@@ -1,0 +1,19 @@
+{
+  "fileHeaderComment.parameter": {
+    "*": {
+      "comment": "//",
+      "project": "my-torrent",
+      "author": "Vasilis Voyiadjis"
+    }
+  },
+  "fileHeaderComment.template": {
+    "*": [
+      "${comment}",
+      "${comment} This file is part of ${project}, a BitTorrent client written in Zig.",
+      "${comment}",
+      "${comment} Created on ${day}/${month}/${year} by ${author}.",
+      "${comment} Distributed under the MIT License.",
+      "${comment}"
+    ]
+  }
+}
