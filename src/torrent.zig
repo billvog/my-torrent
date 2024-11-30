@@ -50,6 +50,7 @@ pub const Torrent = struct {
         self.metadata.info.pieces.deinit();
     }
 
+    /// Extracts the metadata from the root bencoded token of the .torrent file.
     fn metadataFromToken(allocator: std.mem.Allocator, token: bencode.Token) !TorrentMetadata {
         const dict = token.dictionary;
         const tracker_url = dict.get("announce") orelse return error.InvalidTorrentFile;
