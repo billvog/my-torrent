@@ -1,0 +1,22 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug Torrent",
+      "program": "${workspaceFolder}/zig-out/bin/my-torrent",
+      "args": ["info", "-f", "${input:torrentFile}"],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "build"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "torrentFile",
+      "type": "promptString",
+      "default": "./samples/sample.torrent",
+      "description": "Path to .torrent file"
+    }
+  ]
+}
