@@ -47,6 +47,7 @@ pub fn main() !void {
         if (my_torrent.metadata.created_by) |created_by| {
             try stdout.print("Created By: {s}\n", .{created_by});
         }
+        try stdout.print("Info Hash: {s}\n", .{std.fmt.bytesToHex(my_torrent.metadata.info_hash, .lower)});
         try stdout.print("Info:\n", .{});
         try stdout.print("  Name: {s}\n", .{my_torrent.metadata.info.name});
         try stdout.print("  Length: {}\n", .{std.fmt.fmtIntSizeDec(my_torrent.metadata.info.length)});

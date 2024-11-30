@@ -25,7 +25,7 @@ pub const Token = union(enum) {
     integer: i64,
     string: []const u8,
     list: std.ArrayList(Token),
-    dictionary: std.StringHashMap(Token),
+    dictionary: std.StringArrayHashMap(Token),
 };
 
 const DecodedToken = struct {
@@ -45,7 +45,7 @@ pub const Object = struct {
 
     pub fn initFromString(allocator: std.mem.Allocator, encoded_value: []const u8) !Object {
         const result = try decodeValue(allocator, encoded_value);
-        return Object{ .allocator = allocator, .root = result.?.value };
+        return Object{ .allocator = allocator, .root = result.value };
     }
 
     pub fn deinit(self: *Object) void {
@@ -57,7 +57,7 @@ pub const Object = struct {
     }
 };
 
-fn encodeToken(allocator: std.mem.Allocator, token: Token) EncodingError![]const u8 {
+pub fn encodeToken(allocator: std.mem.Allocator, token: Token) EncodingError![]const u8 {
     return switch (token) {
         .integer => try encodeInteger(allocator, token.integer),
         .string => try encodeString(allocator, token.string),
@@ -66,13 +66,13 @@ fn encodeToken(allocator: std.mem.Allocator, token: Token) EncodingError![]const
     };
 }
 
-fn decodeValue(allocator: std.mem.Allocator, encoded_value: []const u8) TokenError!?DecodedToken {
+pub fn decodeValue(allocator: std.mem.Allocator, encoded_value: []const u8) TokenError!DecodedToken {
     const result = switch (encoded_value[0]) {
-        'e' => null,
+        '0'...'9' => try decodeString(encoded_value),
         'i' => try decodeNumber(encoded_value),
         'l' => try decodeList(allocator, encoded_value),
         'd' => try decodeDictionary(allocator, encoded_value),
-        else => try decodeString(encoded_value),
+        else => error.InvalidCharacter,
     };
 
     return result;
@@ -114,7 +114,7 @@ fn encodeInteger(allocator: std.mem.Allocator, value: i64) ![]const u8 {
 fn encodeString(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
     var buffer = std.ArrayList(u8).init(allocator);
     defer buffer.deinit();
-    try std.fmt.format(buffer.writer(), "{d}:{s}", .{ value.len, value });
+    try std.fmt.format(buffer.writer(), "{}:{s}", .{ value.len, value });
     return try buffer.toOwnedSlice();
 }
 
@@ -126,6 +126,8 @@ fn encodeList(allocator: std.mem.Allocator, list: std.ArrayList(Token)) ![]const
 
     for (list.items) |item| {
         const encoded_item = try encodeToken(allocator, item);
+        defer allocator.free(encoded_item);
+
         try buffer.appendSlice(encoded_item);
     }
 
@@ -134,7 +136,7 @@ fn encodeList(allocator: std.mem.Allocator, list: std.ArrayList(Token)) ![]const
     return try buffer.toOwnedSlice();
 }
 
-fn encodeDictionary(allocator: std.mem.Allocator, dict: std.StringHashMap(Token)) ![]const u8 {
+fn encodeDictionary(allocator: std.mem.Allocator, dict: std.StringArrayHashMap(Token)) ![]const u8 {
     var buffer = std.ArrayList(u8).init(allocator);
     defer buffer.deinit();
 
@@ -195,43 +197,31 @@ fn decodeList(allocator: std.mem.Allocator, encoded_value: []const u8) TokenErro
 
     while (index < encoded_value.len) {
         const token = try decodeValue(allocator, encoded_value[index..]);
-        if (token == null) {
-            break;
-        }
 
-        try list.append(token.?.value);
+        try list.append(token.value);
 
-        index += token.?.length;
+        index += token.length;
     }
 
     return DecodedToken{ .value = Token{ .list = list }, .length = index };
 }
 
 fn decodeDictionary(allocator: std.mem.Allocator, encoded_value: []const u8) TokenError!DecodedToken {
-    var dict = std.StringHashMap(Token).init(allocator);
+    var dict = std.StringArrayHashMap(Token).init(allocator);
 
     var index: usize = 1;
 
-    while (index < encoded_value.len) {
+    while (encoded_value[index] != 'e' and index < encoded_value.len) {
         const key_token = try decodeValue(allocator, encoded_value[index..]);
-        if (key_token == null) {
-            break;
-        }
-
-        if (key_token.?.value.string.len == 0) {
+        if (key_token.value != .string) {
             return error.InvalidDictionaryKey;
         }
-
-        index += key_token.?.length;
+        index += key_token.length;
 
         const value_token = try decodeValue(allocator, encoded_value[index..]);
-        if (value_token == null) {
-            break;
-        }
+        index += value_token.length;
 
-        index += value_token.?.length;
-
-        try dict.put(key_token.?.value.string, value_token.?.value);
+        try dict.put(key_token.value.string, value_token.value);
     }
 
     return DecodedToken{ .value = Token{ .dictionary = dict }, .length = index };
