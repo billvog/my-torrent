@@ -8,11 +8,9 @@
 const std = @import("std");
 const stdout = std.io.getStdOut().writer();
 
-const TokenType = enum {
-    Integer,
-    String,
-    List,
-    Dictionary,
+const EncodingError = error{
+    OutOfMemory,
+    Overflow,
 };
 
 const TokenError = error{
@@ -30,119 +28,45 @@ pub const Token = union(enum) {
     dictionary: std.StringHashMap(Token),
 };
 
-const DecodedResult = struct {
+const DecodedToken = struct {
     value: Token,
+    // The length of the *encoded* value.
+    // Used to move the cursor during recursive decoding.
     length: usize,
 };
 
-pub fn decode(allocator: std.mem.Allocator, encoded_value: []const u8) !Token {
-    const decoded_value = try internal_decode(allocator, encoded_value);
-    if (decoded_value == null) {
-        return error.InvalidArgument;
+pub const Object = struct {
+    allocator: std.mem.Allocator,
+    root: Token,
+
+    pub fn init(allocator: std.mem.Allocator, root: Token) Object {
+        return Object{ .allocator = allocator, .root = root };
     }
 
-    return decoded_value.?.value;
-}
-
-pub fn cleanup(allocator: std.mem.Allocator, token: *const Token) void {
-    switch (token.*) {
-        .integer => {},
-        .string => {},
-        .list => {
-            var list = token.list;
-            for (list.items) |item| {
-                cleanup(allocator, &item);
-            }
-            list.deinit();
-        },
-        .dictionary => {
-            var dict = token.dictionary;
-            var it = dict.iterator();
-            while (it.next()) |entry| {
-                cleanup(allocator, entry.value_ptr);
-            }
-            dict.deinit();
-        },
+    pub fn initFromString(allocator: std.mem.Allocator, encoded_value: []const u8) !Object {
+        const result = try decodeValue(allocator, encoded_value);
+        return Object{ .allocator = allocator, .root = result.?.value };
     }
-}
 
-pub fn tokenToString(allocator: std.mem.Allocator, token: Token) ![]const u8 {
-    const result = switch (token) {
-        .integer => {
-            var buffer = std.ArrayList(u8).init(allocator);
-            defer buffer.deinit();
-            try std.fmt.format(buffer.writer(), "{}", .{token.integer});
-            return try buffer.toOwnedSlice();
-        },
-        .string => {
-            var buffer = std.ArrayList(u8).init(allocator);
-            defer buffer.deinit();
-            try std.fmt.format(buffer.writer(), "\"{s}\"", .{token.string});
-            return try buffer.toOwnedSlice();
-        },
-        .list => {
-            var buffer = std.ArrayList(u8).init(allocator);
-            defer buffer.deinit();
+    pub fn deinit(self: *Object) void {
+        deinitToken(self.allocator, &self.root);
+    }
 
-            try buffer.append('[');
+    pub fn encode(self: *Object) ![]const u8 {
+        return encodeToken(self.allocator, self.root);
+    }
+};
 
-            for (token.list.items) |item| {
-                const str = try tokenToString(allocator, item);
-
-                try buffer.appendSlice(str);
-                try buffer.append(',');
-            }
-
-            // Remove the trailing comma
-            if (buffer.items.len > 1) {
-                _ = buffer.pop();
-            }
-
-            try buffer.append(']');
-
-            return try buffer.toOwnedSlice();
-        },
-        .dictionary => {
-            var buffer = std.ArrayList(u8).init(allocator);
-            defer buffer.deinit();
-
-            try buffer.append('{');
-
-            var iterator = token.dictionary.iterator();
-
-            while (iterator.next()) |entry| {
-                const value = try std.fmt.allocPrint(allocator, "\"{s}\": {s}", .{ entry.key_ptr.*, try tokenToString(allocator, entry.value_ptr.*) });
-                defer allocator.free(value);
-
-                try buffer.appendSlice(value);
-                try buffer.append(',');
-            }
-
-            // Remove the trailing comma
-            if (buffer.items.len > 1) {
-                _ = buffer.pop();
-            }
-
-            try buffer.append('}');
-
-            return try buffer.toOwnedSlice();
-        },
-    };
-
-    return result;
-}
-
-pub fn errorToString(err: TokenError) []const u8 {
-    return switch (err) {
-        TokenError.InvalidArgument => "Invalid argument",
-        TokenError.InvalidCharacter => "Invalid character",
-        TokenError.InvalidDictionaryKey => "Invalid dictionary key. Dictionary keys must be strings",
-        TokenError.OutOfMemory => "Out of memory",
-        TokenError.Overflow => "Overflow",
+fn encodeToken(allocator: std.mem.Allocator, token: Token) EncodingError![]const u8 {
+    return switch (token) {
+        .integer => try encodeInteger(allocator, token.integer),
+        .string => try encodeString(allocator, token.string),
+        .list => try encodeList(allocator, token.list),
+        .dictionary => try encodeDictionary(allocator, token.dictionary),
     };
 }
 
-fn internal_decode(allocator: std.mem.Allocator, encoded_value: []const u8) TokenError!?DecodedResult {
+fn decodeValue(allocator: std.mem.Allocator, encoded_value: []const u8) TokenError!?DecodedToken {
     const result = switch (encoded_value[0]) {
         'e' => null,
         'i' => try decodeNumber(encoded_value),
@@ -154,7 +78,87 @@ fn internal_decode(allocator: std.mem.Allocator, encoded_value: []const u8) Toke
     return result;
 }
 
-fn decodeNumber(encoded_value: []const u8) TokenError!DecodedResult {
+fn deinitToken(allocator: std.mem.Allocator, token: *const Token) void {
+    switch (token.*) {
+        .integer => {},
+        .string => {},
+        .list => {
+            var list = token.list;
+            for (list.items) |item| {
+                deinitToken(allocator, &item);
+            }
+            list.deinit();
+        },
+        .dictionary => {
+            var dict = token.dictionary;
+            var it = dict.iterator();
+            while (it.next()) |entry| {
+                deinitToken(allocator, entry.value_ptr);
+            }
+            dict.deinit();
+        },
+    }
+}
+
+//
+// Encoders
+//
+
+fn encodeInteger(allocator: std.mem.Allocator, value: i64) ![]const u8 {
+    var buffer = std.ArrayList(u8).init(allocator);
+    defer buffer.deinit();
+    try std.fmt.format(buffer.writer(), "i{d}e", .{value});
+    return try buffer.toOwnedSlice();
+}
+
+fn encodeString(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
+    var buffer = std.ArrayList(u8).init(allocator);
+    defer buffer.deinit();
+    try std.fmt.format(buffer.writer(), "{d}:{s}", .{ value.len, value });
+    return try buffer.toOwnedSlice();
+}
+
+fn encodeList(allocator: std.mem.Allocator, list: std.ArrayList(Token)) ![]const u8 {
+    var buffer = std.ArrayList(u8).init(allocator);
+    defer buffer.deinit();
+
+    try buffer.append('l');
+
+    for (list.items) |item| {
+        const encoded_item = try encodeToken(allocator, item);
+        try buffer.appendSlice(encoded_item);
+    }
+
+    try buffer.append('e');
+
+    return try buffer.toOwnedSlice();
+}
+
+fn encodeDictionary(allocator: std.mem.Allocator, dict: std.StringHashMap(Token)) ![]const u8 {
+    var buffer = std.ArrayList(u8).init(allocator);
+    defer buffer.deinit();
+
+    try buffer.append('d');
+
+    var iterator = dict.iterator();
+    while (iterator.next()) |entry| {
+        const key = try encodeString(allocator, entry.key_ptr.*);
+        const value = try encodeToken(allocator, entry.value_ptr.*);
+
+        try buffer.appendSlice(key);
+        try buffer.appendSlice(value);
+    }
+
+    try buffer.append('e');
+
+    return try buffer.toOwnedSlice();
+}
+
+//
+// Decoders
+//
+
+fn decodeNumber(encoded_value: []const u8) TokenError!DecodedToken {
     const end = std.mem.indexOf(u8, encoded_value, "e");
     if (end == null) {
         return error.InvalidArgument;
@@ -162,29 +166,10 @@ fn decodeNumber(encoded_value: []const u8) TokenError!DecodedResult {
 
     const number = try std.fmt.parseInt(i64, encoded_value[1..end.?], 10);
 
-    return DecodedResult{ .value = Token{ .integer = number }, .length = end.? + 1 };
+    return DecodedToken{ .value = Token{ .integer = number }, .length = end.? + 1 };
 }
 
-fn decodeList(allocator: std.mem.Allocator, encoded_value: []const u8) TokenError!DecodedResult {
-    var list = std.ArrayList(Token).init(allocator);
-
-    var index: usize = 1;
-
-    while (index < encoded_value.len) {
-        const token = try internal_decode(allocator, encoded_value[index..]);
-        if (token == null) {
-            break;
-        }
-
-        try list.append(token.?.value);
-
-        index += token.?.length;
-    }
-
-    return DecodedResult{ .value = Token{ .list = list }, .length = index };
-}
-
-fn decodeString(encoded_value: []const u8) TokenError!DecodedResult {
+fn decodeString(encoded_value: []const u8) TokenError!DecodedToken {
     const separatorPos = std.mem.indexOf(u8, encoded_value, ":");
     if (separatorPos == null) {
         return error.InvalidArgument;
@@ -200,16 +185,35 @@ fn decodeString(encoded_value: []const u8) TokenError!DecodedResult {
 
     const string = encoded_value[start..end];
 
-    return DecodedResult{ .value = Token{ .string = string }, .length = end };
+    return DecodedToken{ .value = Token{ .string = string }, .length = end };
 }
 
-fn decodeDictionary(allocator: std.mem.Allocator, encoded_value: []const u8) TokenError!DecodedResult {
+fn decodeList(allocator: std.mem.Allocator, encoded_value: []const u8) TokenError!DecodedToken {
+    var list = std.ArrayList(Token).init(allocator);
+
+    var index: usize = 1;
+
+    while (index < encoded_value.len) {
+        const token = try decodeValue(allocator, encoded_value[index..]);
+        if (token == null) {
+            break;
+        }
+
+        try list.append(token.?.value);
+
+        index += token.?.length;
+    }
+
+    return DecodedToken{ .value = Token{ .list = list }, .length = index };
+}
+
+fn decodeDictionary(allocator: std.mem.Allocator, encoded_value: []const u8) TokenError!DecodedToken {
     var dict = std.StringHashMap(Token).init(allocator);
 
     var index: usize = 1;
 
     while (index < encoded_value.len) {
-        const key_token = try internal_decode(allocator, encoded_value[index..]);
+        const key_token = try decodeValue(allocator, encoded_value[index..]);
         if (key_token == null) {
             break;
         }
@@ -220,7 +224,7 @@ fn decodeDictionary(allocator: std.mem.Allocator, encoded_value: []const u8) Tok
 
         index += key_token.?.length;
 
-        const value_token = try internal_decode(allocator, encoded_value[index..]);
+        const value_token = try decodeValue(allocator, encoded_value[index..]);
         if (value_token == null) {
             break;
         }
@@ -230,5 +234,5 @@ fn decodeDictionary(allocator: std.mem.Allocator, encoded_value: []const u8) Tok
         try dict.put(key_token.?.value.string, value_token.?.value);
     }
 
-    return DecodedResult{ .value = Token{ .dictionary = dict }, .length = index };
+    return DecodedToken{ .value = Token{ .dictionary = dict }, .length = index };
 }

@@ -25,12 +25,12 @@ pub const Torrent = struct {
     pub fn init(allocator: std.mem.Allocator, file_path: []const u8) !Torrent {
         const file_contents = try utils.readFileIntoString(allocator, file_path);
 
-        const decoded = bencode.decode(allocator, file_contents) catch {
+        var object = bencode.Object.initFromString(allocator, file_contents) catch {
             return error.InvalidTorrentFile;
         };
-        defer bencode.cleanup(allocator, &decoded);
+        defer object.deinit();
 
-        const metadata = try metadataFromToken(decoded);
+        const metadata = try metadataFromToken(object.root);
 
         return Torrent{
             .allocator = allocator,
