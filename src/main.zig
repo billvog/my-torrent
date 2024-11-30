@@ -42,16 +42,21 @@ pub fn main() !void {
             }
             std.process.exit(1);
         };
+        defer my_torrent.deinit();
 
-        try stdout.print("Tracker URL: {s}\n", .{my_torrent.metadata.announce});
-        if (my_torrent.metadata.created_by) |created_by| {
-            try stdout.print("Created By: {s}\n", .{created_by});
-        }
-        try stdout.print("Info Hash: {s}\n", .{std.fmt.bytesToHex(my_torrent.metadata.info_hash, .lower)});
+        const metadata = my_torrent.metadata;
+
+        try stdout.print("Tracker URL: {s}\n", .{metadata.announce});
+        if (metadata.created_by) |created_by| try stdout.print("Created By: {s}\n", .{created_by});
+        try stdout.print("Info Hash: {s}\n", .{std.fmt.bytesToHex(metadata.info_hash, .lower)});
         try stdout.print("Info:\n", .{});
-        try stdout.print("  Name: {s}\n", .{my_torrent.metadata.info.name});
-        try stdout.print("  Length: {}\n", .{std.fmt.fmtIntSizeDec(my_torrent.metadata.info.length)});
-        try stdout.print("  Piece Length: {d}\n", .{std.fmt.fmtIntSizeDec(my_torrent.metadata.info.piece_length)});
+        try stdout.print("  Name: {s}\n", .{metadata.info.name});
+        try stdout.print("  Length: {}\n", .{std.fmt.fmtIntSizeDec(metadata.info.length)});
+        try stdout.print("  Piece Length: {d}\n", .{std.fmt.fmtIntSizeDec(metadata.info.piece_length)});
+        try stdout.print("  Pieces:\n", .{});
+        for (metadata.info.pieces.items) |piece| {
+            try stdout.print("    {s}\n", .{std.fmt.bytesToHex(piece[0..20], .lower)});
+        }
     }
     // Invalid command. Print usage and exit.
     else {
