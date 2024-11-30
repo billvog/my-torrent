@@ -24,7 +24,7 @@ pub fn main() !void {
 
     const command = args[1];
 
-    if (std.mem.eql(u8, command, "decode")) {
+    if (std.mem.eql(u8, command, "info")) {
         const file_path = try getFilePath(args);
 
         const my_torrent = torrent.Torrent.init(allocator, file_path) catch |err| {
@@ -42,13 +42,13 @@ pub fn main() !void {
             std.process.exit(1);
         };
 
-        try stdout.print("Tracker URL: {s}\n", .{my_torrent.announce});
-        try stdout.print("Length: {d}\n", .{my_torrent.info.length});
+        try stdout.print("Tracker URL: {s}\n", .{my_torrent.metadata.announce});
+        try stdout.print("Length: {d}\n", .{my_torrent.metadata.info.length});
     }
 }
 
 fn printUsage(exe: []const u8) !void {
-    try stdout.print("Usage: {s} decode -f <torrent>\n", .{exe});
+    try stdout.print("Usage: {s} info -f <torrent>\n", .{exe});
     std.process.exit(1);
 }
 
