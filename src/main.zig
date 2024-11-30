@@ -6,7 +6,6 @@
 //
 
 const std = @import("std");
-const allocator = std.heap.page_allocator;
 const stdout = std.io.getStdOut().writer();
 const stderr = std.io.getStdErr().writer();
 
@@ -15,6 +14,11 @@ const commands = @import("commands.zig").Commands;
 const min_arguments = 4;
 
 pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+
+    const allocator = gpa.allocator();
+
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 

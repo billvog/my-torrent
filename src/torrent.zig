@@ -25,14 +25,16 @@ const TorrentMetadata = struct {
 
 pub const Torrent = struct {
     allocator: std.mem.Allocator,
+
     file_path: []const u8,
+    raw_data: []const u8,
 
     metadata: TorrentMetadata,
 
     pub fn init(allocator: std.mem.Allocator, file_path: []const u8) !Torrent {
-        const file_contents = try utils.readFileIntoString(allocator, file_path);
+        const raw_data = try utils.readFileIntoString(allocator, file_path);
 
-        var object = bencode.Object.initFromString(allocator, file_contents) catch {
+        var object: bencode.Object = bencode.Object.initFromString(allocator, raw_data) catch {
             return error.InvalidTorrentFile;
         };
         defer object.deinit();
@@ -42,12 +44,14 @@ pub const Torrent = struct {
         return Torrent{
             .allocator = allocator,
             .file_path = file_path,
+            .raw_data = raw_data,
             .metadata = metadata,
         };
     }
 
     pub fn deinit(self: @This()) void {
         self.metadata.info.pieces.deinit();
+        self.allocator.free(self.raw_data);
     }
 
     /// Extracts the metadata from the root bencoded token of the .torrent file.

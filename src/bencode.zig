@@ -48,11 +48,11 @@ pub const Object = struct {
         return Object{ .allocator = allocator, .root = result.value };
     }
 
-    pub fn deinit(self: *Object) void {
+    pub fn deinit(self: @This()) void {
         deinitToken(self.allocator, &self.root);
     }
 
-    pub fn encode(self: *Object) ![]const u8 {
+    pub fn encode(self: @This()) ![]const u8 {
         return encodeToken(self.allocator, self.root);
     }
 };
@@ -107,14 +107,18 @@ fn deinitToken(allocator: std.mem.Allocator, token: *const Token) void {
 fn encodeInteger(allocator: std.mem.Allocator, value: i64) ![]const u8 {
     var buffer = std.ArrayList(u8).init(allocator);
     defer buffer.deinit();
+
     try std.fmt.format(buffer.writer(), "i{d}e", .{value});
+
     return try buffer.toOwnedSlice();
 }
 
 fn encodeString(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
     var buffer = std.ArrayList(u8).init(allocator);
     defer buffer.deinit();
+
     try std.fmt.format(buffer.writer(), "{}:{s}", .{ value.len, value });
+
     return try buffer.toOwnedSlice();
 }
 
@@ -145,7 +149,10 @@ fn encodeDictionary(allocator: std.mem.Allocator, dict: std.StringArrayHashMap(T
     var iterator = dict.iterator();
     while (iterator.next()) |entry| {
         const key = try encodeString(allocator, entry.key_ptr.*);
+        defer allocator.free(key);
+
         const value = try encodeToken(allocator, entry.value_ptr.*);
+        defer allocator.free(value);
 
         try buffer.appendSlice(key);
         try buffer.appendSlice(value);
