@@ -30,11 +30,11 @@ pub fn main() !void {
 
         const my_torrent = torrent.Torrent.init(allocator, file_path) catch |err| {
             switch (err) {
-                error.CannotReadFile => {
-                    try stderr.print("Error: Cannot read file\n", .{});
-                },
-                error.InvalidTorrentFile, error.MissingAnnounceKey, error.MissingInfoKey, error.MissingLengthKey => {
+                error.InvalidTorrentFile => {
                     try stderr.print("Error: Invalid torrent file\n", .{});
+                },
+                error.FileNotFound, error.CannotReadFile => {
+                    try stderr.print("Error: Cannot open file\n", .{});
                 },
                 else => {
                     try stderr.print("Error: Unknown error\n", .{});
@@ -53,10 +53,25 @@ pub fn main() !void {
         try stdout.print("  Length: {}\n", .{std.fmt.fmtIntSizeDec(my_torrent.metadata.info.length)});
         try stdout.print("  Piece Length: {d}\n", .{std.fmt.fmtIntSizeDec(my_torrent.metadata.info.piece_length)});
     }
+    // Invalid command. Print usage and exit.
+    else {
+        try printUsage(args[0]);
+    }
 }
 
 fn printUsage(exe: []const u8) !void {
-    try stdout.print("Usage: {s} info -f <torrent>\n", .{exe});
+    try stdout.print(
+        \\ my-torrent - A BitTorrent client written in Zig.
+        \\
+        \\ Usage: {s} <command> [options]
+        \\
+        \\ Commands:
+        \\   info       Print the information of the torrent file.
+        \\
+        \\ Options: 
+        \\   -f <file>  The path to the torrent file.
+        \\
+    , .{exe});
     std.process.exit(1);
 }
 

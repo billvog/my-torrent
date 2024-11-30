@@ -48,27 +48,27 @@ pub const Torrent = struct {
 
     fn metadataFromToken(allocator: std.mem.Allocator, token: bencode.Token) !TorrentMetadata {
         const tracker_url: bencode.Token = token.dictionary.get("announce") orelse {
-            return error.MissingAnnounceKey;
+            return error.InvalidTorrentFile;
         };
 
         const created_by: ?bencode.Token = token.dictionary.get("created by");
 
         const info: bencode.Token = token.dictionary.get("info") orelse {
-            return error.MissingInfoKey;
+            return error.InvalidTorrentFile;
         };
 
         const info_hash = try calculateTokenHash(allocator, info);
 
         const length: bencode.Token = info.dictionary.get("length") orelse {
-            return error.MissingLengthKey;
+            return error.InvalidTorrentFile;
         };
 
         const name: bencode.Token = info.dictionary.get("name") orelse {
-            return error.MissingNameKey;
+            return error.InvalidTorrentFile;
         };
 
         const piece_length: bencode.Token = info.dictionary.get("piece length") orelse {
-            return error.MissingPieceLengthKey;
+            return error.InvalidTorrentFile;
         };
 
         return TorrentMetadata{
