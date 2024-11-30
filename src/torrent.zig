@@ -11,8 +11,12 @@ const utils = @import("utils.zig");
 
 const TorrentMetadata = struct {
     announce: []const u8,
+    created_by: ?[]const u8,
     info: struct {
         length: u64,
+        name: []const u8,
+        piece_length: u64,
+        // pieces: [][]const u8,
     },
 };
 
@@ -44,6 +48,8 @@ pub const Torrent = struct {
             return error.MissingAnnounceKey;
         };
 
+        const created_by: ?bencode.Token = token.dictionary.get("created by");
+
         const info: bencode.Token = token.dictionary.get("info") orelse {
             return error.MissingInfoKey;
         };
@@ -52,9 +58,18 @@ pub const Torrent = struct {
             return error.MissingLengthKey;
         };
 
+        const name: bencode.Token = info.dictionary.get("name") orelse {
+            return error.MissingNameKey;
+        };
+
+        const piece_length: bencode.Token = info.dictionary.get("piece length") orelse {
+            return error.MissingPieceLengthKey;
+        };
+
         return TorrentMetadata{
             .announce = tracker_url.string,
-            .info = .{ .length = @as(u64, @intCast(length.integer)) },
+            .created_by = if (created_by) |cb| cb.string else null,
+            .info = .{ .length = @as(u64, @intCast(length.integer)), .name = name.string, .piece_length = @as(u64, @intCast(piece_length.integer)) },
         };
     }
 };
