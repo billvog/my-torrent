@@ -38,10 +38,10 @@ pub const Commands = struct {
         defer my_torrent.deinit();
 
         try stdout.print("Tracker URL: {s}\n", .{my_torrent.metadata.announce});
-
         try my_torrent.getPeers();
     }
 
+    /// Opens torrent file and displays an error message if it fails.
     fn openTorrentFile(allocator: std.mem.Allocator, file_path: []const u8) !torrent.Torrent {
         return torrent.Torrent.init(allocator, file_path) catch |err| {
             switch (err) {
@@ -55,6 +55,7 @@ pub const Commands = struct {
                     try stderr.print("Error: Unknown error\n", .{});
                 },
             }
+
             std.process.exit(1);
         };
     }

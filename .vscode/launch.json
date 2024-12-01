@@ -6,12 +6,27 @@
       "request": "launch",
       "name": "Debug Torrent",
       "program": "${workspaceFolder}/zig-out/bin/my-torrent",
-      "args": ["info", "-f", "${input:torrentFile}"],
+      "args": ["${input:command}", "-f", "${input:torrentFile}"],
       "cwd": "${workspaceFolder}",
       "preLaunchTask": "build"
     }
   ],
   "inputs": [
+    {
+      "id": "command",
+      "type": "pickString",
+      "description": "Command to run",
+      "options": [
+        {
+          "value": "info",
+          "label": "Print torrent info"
+        },
+        {
+          "value": "peers",
+          "label": "Print peers"
+        }
+      ]
+    },
     {
       "id": "torrentFile",
       "type": "promptString",
