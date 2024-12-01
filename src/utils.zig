@@ -6,6 +6,7 @@
 //
 
 const std = @import("std");
+const crypto = std.crypto;
 
 pub fn readFileIntoString(allocator: std.mem.Allocator, file_path: []const u8) ![]const u8 {
     const file = try std.fs.cwd().openFile(file_path, .{});
@@ -21,4 +22,18 @@ pub fn readFileIntoString(allocator: std.mem.Allocator, file_path: []const u8) !
     };
 
     return buffer;
+}
+
+pub fn generateRandomString(allocator: std.mem.Allocator, size: usize) ![]const u8 {
+    const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+    const result = try allocator.alloc(u8, size);
+    errdefer allocator.free(result);
+
+    for (result) |*char| {
+        const random_index = crypto.random.intRangeAtMost(u8, 0, charset.len - 1);
+        char.* = charset[random_index];
+    }
+
+    return result;
 }

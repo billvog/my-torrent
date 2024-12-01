@@ -33,6 +33,11 @@ pub fn main() !void {
         const file_path = try getFilePath(args);
         try commands.printTorrentInfo(allocator, file_path);
     }
+    // Print the peers of the torrent.
+    else if (std.mem.eql(u8, command, "peers")) {
+        const file_path = try getFilePath(args);
+        try commands.printTorrentPeers(allocator, file_path);
+    }
     // Invalid command. Print usage and exit.
     else {
         try printUsage(args[0]);
@@ -46,7 +51,8 @@ fn printUsage(exe: []const u8) !void {
         \\ Usage: {s} <command> [options]
         \\
         \\ Commands:
-        \\   info       Print the information of the torrent file.
+        \\   info       Print the information of the torrent.
+        \\   peers      Print the peers of the torrent.
         \\
         \\ Options: 
         \\   -f <file>  The path to the torrent file.

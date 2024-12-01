@@ -14,20 +14,7 @@ const torrent = @import("torrent.zig");
 pub const Commands = struct {
     /// Print the information of the torrent file.
     pub fn printTorrentInfo(allocator: std.mem.Allocator, file_path: []const u8) !void {
-        const my_torrent = torrent.Torrent.init(allocator, file_path) catch |err| {
-            switch (err) {
-                error.InvalidTorrentFile => {
-                    try stderr.print("Error: Invalid torrent file\n", .{});
-                },
-                error.FileNotFound, error.CannotReadFile => {
-                    try stderr.print("Error: Cannot open file\n", .{});
-                },
-                else => {
-                    try stderr.print("Error: Unknown error\n", .{});
-                },
-            }
-            std.process.exit(1);
-        };
+        const my_torrent = try openTorrentFile(allocator, file_path);
         defer my_torrent.deinit();
 
         const metadata = my_torrent.metadata;
@@ -43,5 +30,32 @@ pub const Commands = struct {
         for (metadata.info.pieces.items) |piece| {
             try stdout.print("    {s}\n", .{std.fmt.bytesToHex(piece[0..20], .lower)});
         }
+    }
+
+    /// Download the torrent.
+    pub fn printTorrentPeers(allocator: std.mem.Allocator, file_path: []const u8) !void {
+        const my_torrent = try openTorrentFile(allocator, file_path);
+        defer my_torrent.deinit();
+
+        try stdout.print("Tracker URL: {s}\n", .{my_torrent.metadata.announce});
+
+        try my_torrent.getPeers();
+    }
+
+    fn openTorrentFile(allocator: std.mem.Allocator, file_path: []const u8) !torrent.Torrent {
+        return torrent.Torrent.init(allocator, file_path) catch |err| {
+            switch (err) {
+                error.InvalidTorrentFile => {
+                    try stderr.print("Error: Invalid torrent file\n", .{});
+                },
+                error.FileNotFound, error.CannotReadFile => {
+                    try stderr.print("Error: Cannot open file\n", .{});
+                },
+                else => {
+                    try stderr.print("Error: Unknown error\n", .{});
+                },
+            }
+            std.process.exit(1);
+        };
     }
 };
