@@ -8,6 +8,9 @@
 const std = @import("std");
 const sha1 = std.crypto.hash.Sha1;
 const http = std.http;
+const net = std.net;
+
+const stdout = std.io.getStdOut().writer();
 
 const bencode = @import("bencode.zig");
 const utils = @import("utils.zig");
@@ -24,13 +27,32 @@ const TorrentMetadata = struct {
     },
 };
 
+const TorrentPeer = struct {
+    ip: [4]u8,
+    port: u16,
+
+    pub fn toSlice(self: @This(), allocator: std.mem.Allocator) ![]const u8 {
+        return try std.fmt.allocPrint(allocator, "{d}.{d}.{d}.{d}:{d}", .{ self.ip[0], self.ip[1], self.ip[2], self.ip[3], self.port });
+    }
+};
+
+const TorrentPeers = std.ArrayList(TorrentPeer);
+
+const TorrentHandshake = extern struct {
+    protocol_length: u8 align(1) = 19,
+    ident: [19]u8 align(1) = "BitTorrent protocol".*,
+    reserved: [8]u8 align(1) = std.mem.zeroes([8]u8),
+    info_hash: [20]u8 align(1),
+    peer_id: [20]u8 align(1),
+};
+
 const ClientAbbreviation: []const u8 = "MT";
 const ClientVersion = "0001";
 
 pub const Torrent = struct {
     allocator: std.mem.Allocator,
 
-    peer_id: []const u8,
+    peer_id: [20]u8,
 
     file_path: []const u8,
     raw_data: []const u8,
@@ -39,7 +61,6 @@ pub const Torrent = struct {
 
     pub fn init(allocator: std.mem.Allocator, file_path: []const u8) !Torrent {
         const peer_id = try generatePeerId(allocator);
-        errdefer allocator.free(peer_id);
 
         const raw_data = try utils.readFileIntoString(allocator, file_path);
 
@@ -60,21 +81,17 @@ pub const Torrent = struct {
     }
 
     pub fn deinit(self: @This()) void {
-        self.allocator.free(self.peer_id);
         self.allocator.free(self.raw_data);
         self.metadata.info.pieces.deinit();
     }
 
-    fn generatePeerId(allocator: std.mem.Allocator) ![]const u8 {
+    fn generatePeerId(allocator: std.mem.Allocator) ![20]u8 {
         const random_string = try utils.generateRandomString(allocator, 12);
         defer allocator.free(random_string);
 
-        var peer_id = std.ArrayList(u8).init(allocator);
-        defer peer_id.deinit();
-
-        try peer_id.writer().print("-{s}{s}-{s}", .{ ClientAbbreviation, ClientVersion, random_string });
-
-        return try peer_id.toOwnedSlice();
+        var buffer: [20]u8 = undefined;
+        _ = try std.fmt.bufPrint(&buffer, "-{s}{s}-{s}", .{ ClientAbbreviation, ClientVersion, random_string });
+        return buffer;
     }
 
     /// Extracts the metadata from the root bencoded token of the .torrent file.
@@ -124,22 +141,14 @@ pub const Torrent = struct {
         return hash;
     }
 
-    pub fn getPeers(self: @This()) !void {
+    pub fn getPeers(self: @This()) !TorrentPeers {
         // Fetch peers from the tracker.
         const response = try self.fetchPeers();
         defer response.deinit();
 
         // Parse the peers.
         const peer_list = try self.parsePeers(response);
-        defer peer_list.deinit();
-
-        // Print peers for debugging.
-        std.debug.print("Peers:\n", .{});
-        for (peer_list.items) |peer| {
-            const ip = peer[0..4];
-            const port = std.mem.bytesToValue(u16, peer[4..6]);
-            std.debug.print("  {d}.{d}.{d}.{d}:{d}\n", .{ ip[0], ip[1], ip[2], ip[3], std.mem.bigToNative(u16, port) });
-        }
+        return peer_list;
     }
 
     /// Makes a GET request to the tracker URL to fetch peers.
@@ -185,7 +194,7 @@ pub const Torrent = struct {
     }
 
     /// Given the raw response from the tracker, parses the peers.
-    fn parsePeers(self: @This(), raw_response: std.ArrayList(u8)) !std.ArrayList([]const u8) {
+    fn parsePeers(self: @This(), raw_response: std.ArrayList(u8)) !TorrentPeers {
         // Decode response.
         const object = bencode.Object.initFromString(self.allocator, raw_response.items) catch {
             return error.InvalidTrackerResponse;
@@ -201,14 +210,77 @@ pub const Torrent = struct {
         const peers = object.root.dictionary.get("peers") orelse return error.InvalidTrackerResponse;
 
         // The peers key should be a string. We will parse it as a list of 6-byte strings.
-        var peer_list = std.ArrayList([]const u8).init(self.allocator);
+        var peer_list = TorrentPeers.init(self.allocator);
         errdefer peer_list.deinit();
 
         var pieces_window = std.mem.window(u8, peers.string, 6, 6);
         while (pieces_window.next()) |piece| {
-            try peer_list.append(piece);
+            var ip: [4]u8 = undefined;
+            @memcpy(&ip, piece[0..4]);
+
+            // Convert the port from big-endian to little-endian.
+            const port = @as(u16, piece[4]) << 8 | piece[5];
+
+            try peer_list.append(TorrentPeer{
+                .ip = ip,
+                .port = port,
+            });
         }
 
         return peer_list;
+    }
+
+    /// Performs a handshake with the torrent.
+    pub fn handshake(self: @This()) !void {
+        // Get the peers.
+        const peers = try self.getPeers();
+        defer peers.deinit();
+
+        var did_handshake = false;
+
+        // Try and connect to a peer.
+        for (peers.items) |peer| {
+            const peer_str = try peer.toSlice(self.allocator);
+            defer self.allocator.free(peer_str);
+
+            std.debug.print("Handshake: Connecting to peer: {s}\n", .{peer_str});
+
+            self.handshakeWithPeer(peer) catch |err| {
+                std.debug.print("Handshake: Failed: {}\n", .{err});
+                std.debug.print("Handshake: Trying next peer...\n", .{});
+                continue;
+            };
+
+            // If we get successful handshake, break the loop.
+            did_handshake = true;
+            break;
+        }
+
+        if (!did_handshake) {
+            return error.HandshakeFailed;
+        }
+    }
+
+    /// Performs a handshake with a peer.
+    fn handshakeWithPeer(self: @This(), peer: TorrentPeer) !void {
+        const address = net.Address.initIp4(peer.ip, peer.port);
+
+        var socket = try net.tcpConnectToAddress(address);
+        defer socket.close();
+
+        const writer = socket.writer();
+        const reader = socket.reader();
+
+        // Send the handshake message.
+        try writer.writeStruct(TorrentHandshake{
+            .info_hash = self.metadata.info_hash,
+            .peer_id = self.peer_id,
+        });
+
+        // Receive the handshake response.
+        const response_handshake = try reader.readStruct(TorrentHandshake);
+
+        // Print peer's id.
+        try stdout.print("Handshake: Peer Id: {s}\n", .{std.fmt.bytesToHex(response_handshake.peer_id, .lower)});
     }
 };

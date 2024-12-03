@@ -24,6 +24,10 @@
         {
           "value": "peers",
           "label": "Print peers"
+        },
+        {
+          "value": "handshake",
+          "label": "Perform handshake"
         }
       ]
     },

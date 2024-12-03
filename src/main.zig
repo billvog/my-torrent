@@ -37,6 +37,10 @@ pub fn main() !void {
     else if (std.mem.eql(u8, command, "peers")) {
         try commands.printTorrentPeers(allocator, file_path);
     }
+    // Perform a handshake with the torrent.
+    else if (std.mem.eql(u8, command, "handshake")) {
+        try commands.performTorrentHandshake(allocator, file_path);
+    }
     // Invalid command. Print usage and exit.
     else {
         try printUsage(args[0]);
@@ -50,11 +54,19 @@ fn printUsage(exe: []const u8) !void {
         \\ Usage: {s} <command> [options]
         \\
         \\ Commands:
-        \\   info       Print the information of the torrent.
-        \\   peers      Print the peers of the torrent.
+        \\
+        \\   info         Print the information of the torrent.
+        \\                This doesn't make any network requests. It just reads and decodes the torrent file.
+        \\
+        \\   peers        Print the peers of the torrent.
+        \\                This fetches the peers from the tracker, prints them and exits.
+        \\
+        \\   handshake    Perform a handshake with one peer.
+        \\                This fetches the peers from the tracker, tries to perform a handshake with one of them and exits.
         \\
         \\ Options: 
-        \\   -f <file>  The path to the torrent file.
+        \\
+        \\   -f <file>    The path to the torrent file.
         \\
     , .{exe});
     std.process.exit(1);

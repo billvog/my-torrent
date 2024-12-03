@@ -38,7 +38,33 @@ pub const Commands = struct {
         defer my_torrent.deinit();
 
         try stdout.print("Tracker URL: {s}\n", .{my_torrent.metadata.announce});
-        try my_torrent.getPeers();
+        try stdout.print("Fetching peers from tracker...\n", .{});
+
+        const peers = try my_torrent.getPeers();
+        defer peers.deinit();
+
+        try stdout.print("Peers:\n", .{});
+
+        for (peers.items) |peer| {
+            const peer_str = try peer.toSlice(allocator);
+            defer allocator.free(peer_str);
+
+            try stdout.print("  {s}\n", .{peer_str});
+        }
+    }
+
+    /// Perform a handshake with the torrent.
+    pub fn performTorrentHandshake(allocator: std.mem.Allocator, file_path: []const u8) !void {
+        const my_torrent = try openTorrentFile(allocator, file_path);
+        defer my_torrent.deinit();
+
+        try stdout.print("Tracker URL: {s}\n", .{my_torrent.metadata.announce});
+        try stdout.print("Performing handshake...\n", .{});
+
+        my_torrent.handshake() catch |err| {
+            try stderr.print("Error: Handshake failed: {}\n", .{err});
+            std.process.exit(1);
+        };
     }
 
     /// Opens torrent file and displays an error message if it fails.
