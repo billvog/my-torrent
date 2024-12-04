@@ -27,12 +27,12 @@ pub const Commands = struct {
         try stdout.print("  Length: {}\n", .{std.fmt.fmtIntSizeDec(metadata.info.length)});
         try stdout.print("  Piece Length: {d}\n", .{std.fmt.fmtIntSizeDec(metadata.info.piece_length)});
         try stdout.print("  Pieces:\n", .{});
-        for (metadata.info.pieces.items) |piece| {
+        for (metadata.info.pieces) |piece| {
             try stdout.print("    {s}\n", .{std.fmt.bytesToHex(piece[0..20], .lower)});
         }
     }
 
-    /// Download the torrent.
+    /// Print the peers of the torrent.
     pub fn printTorrentPeers(allocator: std.mem.Allocator, file_path: []const u8) !void {
         const my_torrent = try openTorrentFile(allocator, file_path);
         defer my_torrent.deinit();
@@ -61,10 +61,22 @@ pub const Commands = struct {
         try stdout.print("Tracker URL: {s}\n", .{my_torrent.metadata.announce});
         try stdout.print("Performing handshake...\n", .{});
 
-        my_torrent.handshake() catch |err| {
+        var stream = my_torrent.handshake() catch |err| {
             try stderr.print("Error: Handshake failed: {}\n", .{err});
             std.process.exit(1);
         };
+        defer stream.close();
+    }
+
+    /// Download a piece of the torrent.
+    pub fn downloadTorrentPiece(allocator: std.mem.Allocator, file_path: []const u8, piece_index: u32, output_file: []const u8) !void {
+        var my_torrent = try openTorrentFile(allocator, file_path);
+        defer my_torrent.deinit();
+
+        try stdout.print("Tracker URL: {s}\n", .{my_torrent.metadata.announce});
+        try stdout.print("Downloading piece {}...\n", .{piece_index});
+
+        try my_torrent.downloadPiece(piece_index, output_file);
     }
 
     /// Opens torrent file and displays an error message if it fails.

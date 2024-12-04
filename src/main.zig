@@ -27,19 +27,40 @@ pub fn main() !void {
     }
 
     const command = args[1];
-    const file_path = try getFilePath(args);
+
+    const file_path = getOption(args, "-f");
+    if (file_path == null) {
+        try stderr.print("Error: Missing file path to torrent.", .{});
+        try printUsage(args[0]);
+    }
 
     // Print the information of the torrent file.
     if (std.mem.eql(u8, command, "info")) {
-        try commands.printTorrentInfo(allocator, file_path);
+        try commands.printTorrentInfo(allocator, file_path.?);
     }
     // Print the peers of the torrent.
     else if (std.mem.eql(u8, command, "peers")) {
-        try commands.printTorrentPeers(allocator, file_path);
+        try commands.printTorrentPeers(allocator, file_path.?);
     }
     // Perform a handshake with the torrent.
     else if (std.mem.eql(u8, command, "handshake")) {
-        try commands.performTorrentHandshake(allocator, file_path);
+        try commands.performTorrentHandshake(allocator, file_path.?);
+    }
+    // Download a piece of the torrent
+    else if (std.mem.eql(u8, command, "download-piece")) {
+        if (args.len < 7) {
+            try printUsage(args[0]);
+        }
+
+        const piece_index = try std.fmt.parseInt(u32, args[2], 10);
+
+        const output_file = getOption(args, "-o");
+        if (output_file == null) {
+            try stderr.print("Error: Missing output file path.", .{});
+            try printUsage(args[0]);
+        }
+
+        try commands.downloadTorrentPiece(allocator, file_path.?, piece_index, output_file.?);
     }
     // Invalid command. Print usage and exit.
     else {
@@ -55,32 +76,41 @@ fn printUsage(exe: []const u8) !void {
         \\
         \\ Commands:
         \\
-        \\   info         Print the information of the torrent.
-        \\                This doesn't make any network requests. It just reads and decodes the torrent file.
+        \\   info ..................... Print the information of the torrent.
+        \\                              This doesn't make any network requests. It just reads and decodes the torrent file.
         \\
-        \\   peers        Print the peers of the torrent.
-        \\                This fetches the peers from the tracker, prints them and exits.
+        \\   peers .................... Print the peers of the torrent.
+        \\                              This fetches the peers from the tracker, prints them and exits.
         \\
-        \\   handshake    Perform a handshake with one peer.
-        \\                This fetches the peers from the tracker, tries to perform a handshake with one of them and exits.
+        \\   handshake ................ Perform a handshake with one peer.
+        \\                              This fetches the peers from the tracker, tries to perform a handshake with one of them and exits.
+        \\
+        \\   download-piece <index> ... Download a piece of the torrent.
         \\
         \\ Options: 
         \\
-        \\   -f <file>    The path to the torrent file.
+        \\   -f <file> ................ The path to the torrent file.
+        \\   -o <output> .............. The path to the output file.
         \\
     , .{exe});
     std.process.exit(1);
 }
 
-fn getFilePath(args: [][]const u8) ![]const u8 {
-    if (args.len < min_arguments) {
-        try printUsage(args[0]);
+fn getOption(args: [][]const u8, option: []const u8) ?[]const u8 {
+    var has_option = false;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], option)) {
+            has_option = true;
+            break;
+        }
     }
 
-    if (std.mem.eql(u8, args[2], "-f") == false) {
-        try printUsage(args[0]);
+    if (!has_option or args.len <= (i + 1)) {
+        return null;
     }
 
-    const path = args[3];
-    return path;
+    const value = args[i + 1];
+    return value;
 }
