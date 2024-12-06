@@ -47,12 +47,10 @@ pub fn main() !void {
         try commands.performTorrentHandshake(allocator, file_path.?);
     }
     // Download a piece of the torrent
-    else if (std.mem.eql(u8, command, "download-piece")) {
-        if (args.len < 7) {
+    else if (std.mem.eql(u8, command, "download")) {
+        if (args.len < 6) {
             try printUsage(args[0]);
         }
-
-        const piece_index = try std.fmt.parseInt(u32, args[2], 10);
 
         const output_file = getOption(args, "-o");
         if (output_file == null) {
@@ -60,7 +58,10 @@ pub fn main() !void {
             try printUsage(args[0]);
         }
 
-        try commands.downloadTorrentPiece(allocator, file_path.?, piece_index, output_file.?);
+        const threads = getOption(args, "-t") orelse "2";
+        const threads_num = try std.fmt.parseInt(usize, threads, 10);
+
+        try commands.downloadTorrent(allocator, file_path.?, output_file.?, threads_num);
     }
     // Invalid command. Print usage and exit.
     else {
@@ -85,12 +86,13 @@ fn printUsage(exe: []const u8) !void {
         \\   handshake ................ Perform a handshake with one peer.
         \\                              This fetches the peers from the tracker, tries to perform a handshake with one of them and exits.
         \\
-        \\   download-piece <index> ... Download a piece of the torrent.
+        \\   download ................. Download torrent and save it to *output file*.
         \\
         \\ Options: 
         \\
         \\   -f <file> ................ The path to the torrent file.
         \\   -o <output> .............. The path to the output file.
+        \\   [-t <threads_num>] ....... The number of threads to use for downloading the torrent. Default is 2.
         \\
     , .{exe});
     std.process.exit(1);

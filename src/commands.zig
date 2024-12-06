@@ -69,14 +69,14 @@ pub const Commands = struct {
     }
 
     /// Download a piece of the torrent.
-    pub fn downloadTorrentPiece(allocator: std.mem.Allocator, file_path: []const u8, piece_index: u32, output_file: []const u8) !void {
+    pub fn downloadTorrent(allocator: std.mem.Allocator, file_path: []const u8, output_file: []const u8, threads_num: usize) !void {
         var my_torrent = try openTorrentFile(allocator, file_path);
         defer my_torrent.deinit();
 
         try stdout.print("Tracker URL: {s}\n", .{my_torrent.metadata.announce});
-        try stdout.print("Downloading piece {}...\n", .{piece_index});
+        try stdout.print("Downloading torrent...\n", .{});
 
-        try my_torrent.downloadPiece(piece_index, output_file);
+        try my_torrent.download(output_file, threads_num);
     }
 
     /// Opens torrent file and displays an error message if it fails.

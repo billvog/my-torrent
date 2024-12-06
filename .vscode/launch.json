@@ -13,11 +13,10 @@
     {
       "type": "lldb",
       "request": "launch",
-      "name": "Debug Torrent (download piece)",
+      "name": "Debug Torrent (download)",
       "program": "${workspaceFolder}/zig-out/bin/my-torrent",
       "args": [
-        "download-piece",
-        "${input:pieceIndex}",
+        "download",
         "-f",
         "${input:torrentFile}",
         "-o",
@@ -56,14 +55,8 @@
     {
       "id": "outputFile",
       "type": "promptString",
-      "default": "./downloads/my-file",
+      "default": "./samples/zero-piece",
       "description": "Path to output file"
-    },
-    {
-      "id": "pieceIndex",
-      "type": "promptString",
-      "default": "0",
-      "description": "Piece index to download"
     }
   ]
 }

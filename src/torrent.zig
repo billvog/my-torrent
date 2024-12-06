@@ -13,6 +13,11 @@ const net = std.net;
 const bencode = @import("bencode.zig");
 const utils = @import("utils.zig");
 
+const ClientAbbreviation: []const u8 = "MT";
+const ClientVersion = "0001";
+
+const MAX_PIECE_RETRIES = 3;
+
 const Metadata = struct {
     announce: []const u8,
     created_by: ?[]const u8,
@@ -145,8 +150,104 @@ const PeerMessage = union(PeerMessageType) {
     }
 };
 
-const ClientAbbreviation: []const u8 = "MT";
-const ClientVersion = "0001";
+const PieceInfo = struct {
+    index: u32,
+    retries: u32,
+};
+
+// Thread-safe queue for piece tasks
+const PieceQueue = struct {
+    mutex: std.Thread.Mutex,
+    pieces: std.ArrayList(PieceInfo),
+    allocator: std.mem.Allocator,
+
+    fn init(allocator: std.mem.Allocator) PieceQueue {
+        return .{
+            .mutex = .{},
+            .pieces = std.ArrayList(PieceInfo).init(allocator),
+            .allocator = allocator,
+        };
+    }
+
+    fn deinit(self: *PieceQueue) void {
+        self.pieces.deinit();
+    }
+
+    fn push(self: *PieceQueue, piece: PieceInfo) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        try self.pieces.append(piece);
+    }
+
+    fn pop(self: *PieceQueue) ?PieceInfo {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.pieces.items.len == 0) return null;
+        return self.pieces.orderedRemove(0);
+    }
+};
+
+const DownloadedPiece = struct {
+    index: u32,
+    data: []u8,
+
+    pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        allocator.free(self.data);
+    }
+};
+
+const WorkerContext = struct {
+    queue: *PieceQueue,
+    torrent: *Torrent,
+    result_buffer: *std.ArrayList(DownloadedPiece),
+    result_mutex: *std.Thread.Mutex,
+    stream: ?net.Stream = null,
+};
+
+fn workerThread(context: *WorkerContext) void {
+    context.stream = context.torrent.initPeer() catch |err| {
+        std.debug.print("Failed to init peer: {}\n", .{err});
+        return;
+    };
+
+    defer context.stream.?.close();
+
+    std.debug.print("== Thread Worker ==\n", .{});
+
+    while (true) {
+        // Get next piece from queue
+        const piece_info = context.queue.pop() orelse break;
+
+        // Download the piece
+        const piece_data = context.torrent.downloadPiece(&context.stream.?, piece_info.index) catch |err| {
+            std.debug.print("Error downloading piece: {}: {}\n", .{ piece_info.index, err });
+
+            // Re-queue if under max retries
+            if (piece_info.retries < MAX_PIECE_RETRIES) {
+                context.queue.push(.{
+                    .index = piece_info.index,
+                    .retries = piece_info.retries + 1,
+                }) catch {
+                    std.debug.print("Failed to re-queue piece {}\n", .{piece_info.index});
+                };
+            } else {
+                std.debug.print("Piece {} failed after {} retries\n", .{ piece_info.index, MAX_PIECE_RETRIES });
+            }
+
+            // Continue to next piece
+            continue;
+        };
+
+        // Store the result
+        context.result_mutex.lock();
+        defer context.result_mutex.unlock();
+
+        context.result_buffer.append(.{
+            .index = piece_info.index,
+            .data = piece_data,
+        }) catch continue;
+    }
+}
 
 pub const Torrent = struct {
     allocator: std.mem.Allocator,
@@ -384,15 +485,89 @@ pub const Torrent = struct {
         return stream;
     }
 
-    /// Download a piece of the torrent.
-    pub fn downloadPiece(self: @This(), piece_index: u32, output_file: []const u8) !void {
-        // Open file. We do this first to ensure we can
-        // write to the file before downloading the piece.
-        const file = try std.fs.cwd().openFile(output_file, .{ .mode = .write_only });
+    /// Downloads the whole torrent using multiple threads.
+    pub fn download(self: *@This(), output_file: []const u8, num_threads: usize) !void {
+        var piece_queue = PieceQueue.init(self.allocator);
+        defer piece_queue.deinit();
+
+        // Fill queue with all piece indices
+        for (0..self.metadata.info.pieces.len) |i| {
+            try piece_queue.push(.{
+                .index = @intCast(i),
+                .retries = 0,
+            });
+        }
+
+        // Create shared result buffer
+        var result_buffer = std.ArrayList(DownloadedPiece).init(self.allocator);
+        defer {
+            for (result_buffer.items) |piece| {
+                piece.deinit(self.allocator);
+            }
+            result_buffer.deinit();
+        }
+
+        // Mutex for result buffer
+        var result_mutex = std.Thread.Mutex{};
+
+        // Allocate worker threads
+        var threads = try self.allocator.alloc(std.Thread, num_threads);
+        defer self.allocator.free(threads);
+
+        // Allocate worker contexts
+        var contexts = try self.allocator.alloc(WorkerContext, num_threads);
+        defer self.allocator.free(contexts);
+
+        for (0..num_threads) |i| {
+            contexts[i] = .{
+                .queue = &piece_queue,
+                .torrent = self,
+                .result_buffer = &result_buffer,
+                .result_mutex = &result_mutex,
+            };
+
+            threads[i] = try std.Thread.spawn(.{}, workerThread, .{&contexts[i]});
+        }
+
+        // Open output file in main thread
+        const file = try std.fs.cwd().createFile(output_file, .{});
         defer file.close();
 
+        var downloaded_pieces: usize = 0;
+
+        // Process completed pieces and write to file
+        while (downloaded_pieces < self.metadata.info.pieces.len) {
+            if (result_buffer.items.len > 0) {
+                result_mutex.lock();
+                const piece = result_buffer.orderedRemove(0);
+                defer self.allocator.free(piece.data);
+                result_mutex.unlock();
+
+                std.debug.print("Writing piece: {}\n", .{piece.index});
+
+                // Write piece to file at correct offset
+                try file.seekTo(piece.index * self.metadata.info.piece_length);
+                try file.writeAll(piece.data);
+
+                downloaded_pieces += 1;
+            }
+
+            std.time.sleep(10 * std.time.ns_per_ms);
+        }
+
+        std.debug.print("Downloaded all pieces. Terminating threads.\n", .{});
+
+        // Wait for all threads to complete
+        for (threads) |thread| {
+            thread.join();
+        }
+    }
+
+    /// Makes a handshake and sends initial requests to the peer.
+    fn initPeer(self: @This()) !net.Stream {
         // Make a handshake with the peer.
         const stream = try self.handshake();
+        errdefer stream.close();
 
         const writer = stream.writer().any();
         const reader = stream.reader().any();
@@ -405,8 +580,6 @@ pub const Torrent = struct {
                 return error.UnexpectedMessageExpectedBitfield;
             }
         }
-
-        std.debug.print("Download: Bitfield received\n", .{});
 
         // Send interested message.
         const interested_message: PeerMessage = .interested;
@@ -422,8 +595,11 @@ pub const Torrent = struct {
             }
         }
 
-        std.debug.print("Download: Unchoke received\n", .{});
+        return stream;
+    }
 
+    /// Download a piece of the torrent.
+    fn downloadPiece(self: @This(), stream: *net.Stream, piece_index: u32) ![]u8 {
         // Calculate the piece's length.
         var piece_length = self.metadata.info.piece_length;
         if (piece_index == self.metadata.info.pieces.len - 1) {
@@ -431,27 +607,23 @@ pub const Torrent = struct {
         }
 
         const piece_buf = try self.allocator.alloc(u8, piece_length);
-        defer self.allocator.free(piece_buf);
+        errdefer self.allocator.free(piece_buf);
 
         // Download the full piece.
         try self.requestPieceBlocks(stream, piece_index, piece_buf, self.metadata.info.pieces[piece_index]);
 
-        // Move cursor to the correct position in the file for the piece.
-        const cursor_pos = piece_index * self.metadata.info.piece_length;
-        try file.seekTo(cursor_pos);
-
-        _ = try file.write(piece_buf);
-
-        std.debug.print("Download: Piece {} downloaded, saved at {s}\n", .{ piece_index, output_file });
+        return piece_buf;
     }
 
     /// Request blocks of a piece from the peer, and verify the hash.
-    fn requestPieceBlocks(self: @This(), stream: net.Stream, piece_index: u32, piece_buf: []u8, piece_hash: [sha1.digest_length]u8) !void {
+    fn requestPieceBlocks(self: @This(), stream: *net.Stream, piece_index: u32, piece_buf: []u8, piece_hash: [sha1.digest_length]u8) !void {
         const writer = stream.writer().any();
         const reader = stream.reader().any();
 
         var begin: u32 = 0;
         const block_size = @min(16 * 1024, piece_buf.len);
+
+        std.debug.print("Downloading piece: {} -- block: {}\n", .{ piece_index, block_size });
 
         while (begin < piece_buf.len) : (begin += block_size) {
             // Send request for block.
@@ -459,12 +631,17 @@ pub const Torrent = struct {
             const request: PeerMessage = .{ .request = .{ .index = piece_index, .begin = begin, .length = cur_block_len } };
             try request.write(writer);
 
+            std.debug.print("Requested block for piece: {} -- begin: {} -- length: {}\n", .{ piece_index, begin, cur_block_len });
+
             // Receive the block.
             const response: PeerMessage = try PeerMessage.read(self.allocator, reader);
             defer response.deinit(self.allocator);
             if (response != .piece) {
                 return error.UnexpectedMessageExpectedPiece;
             }
+
+            // Add leading space to align with 'requested block' log above.
+            std.debug.print(" Received block for piece: {}\n", .{piece_index});
 
             // Verify it's the one we requested.
             if (begin != response.piece.begin or cur_block_len != response.piece.block.len) {
@@ -482,5 +659,7 @@ pub const Torrent = struct {
         if (std.mem.eql(u8, &hash, &piece_hash) == false) {
             return error.InvalidPieceHash;
         }
+
+        std.debug.print("Downloaded piece: {}\n", .{piece_index});
     }
 };
