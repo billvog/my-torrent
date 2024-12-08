@@ -55,7 +55,7 @@
     {
       "id": "outputFile",
       "type": "promptString",
-      "default": "./samples/zero-piece",
+      "default": "./out/sample",
       "description": "Path to output file"
     }
   ]

@@ -58,10 +58,7 @@ pub fn main() !void {
             try printUsage(args[0]);
         }
 
-        const threads = getOption(args, "-t") orelse "2";
-        const threads_num = try std.fmt.parseInt(usize, threads, 10);
-
-        try commands.downloadTorrent(allocator, file_path.?, output_file.?, threads_num);
+        try commands.downloadTorrent(allocator, file_path.?, output_file.?);
     }
     // Invalid command. Print usage and exit.
     else {
@@ -92,7 +89,6 @@ fn printUsage(exe: []const u8) !void {
         \\
         \\   -f <file> ................ The path to the torrent file.
         \\   -o <output> .............. The path to the output file.
-        \\   [-t <threads_num>] ....... The number of threads to use for downloading the torrent. Default is 2.
         \\
     , .{exe});
     std.process.exit(1);

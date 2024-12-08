@@ -201,18 +201,16 @@ const WorkerContext = struct {
     torrent: *Torrent,
     result_buffer: *std.ArrayList(DownloadedPiece),
     result_mutex: *std.Thread.Mutex,
+    peer: Peer,
     stream: ?net.Stream = null,
 };
 
 fn workerThread(context: *WorkerContext) void {
-    context.stream = context.torrent.initPeer() catch |err| {
+    context.stream = context.torrent.initPeer(context.peer) catch |err| {
         std.debug.print("Failed to init peer: {}\n", .{err});
         return;
     };
-
     defer context.stream.?.close();
-
-    std.debug.print("== Thread Worker ==\n", .{});
 
     while (true) {
         // Get next piece from queue
@@ -344,6 +342,7 @@ pub const Torrent = struct {
         return hash;
     }
 
+    /// Fetches the peers from the tracker and parses them.
     pub fn getPeers(self: @This()) !Peers {
         // Fetch peers from the tracker.
         const response = try self.fetchPeers();
@@ -486,7 +485,10 @@ pub const Torrent = struct {
     }
 
     /// Downloads the whole torrent using multiple threads.
-    pub fn download(self: *@This(), output_file: []const u8, num_threads: usize) !void {
+    pub fn download(self: *@This(), output_file: []const u8) !void {
+        var peers = try self.getPeers();
+        defer peers.deinit();
+
         var piece_queue = PieceQueue.init(self.allocator);
         defer piece_queue.deinit();
 
@@ -510,6 +512,9 @@ pub const Torrent = struct {
         // Mutex for result buffer
         var result_mutex = std.Thread.Mutex{};
 
+        // One thread per peer
+        const num_threads = peers.items.len;
+
         // Allocate worker threads
         var threads = try self.allocator.alloc(std.Thread, num_threads);
         defer self.allocator.free(threads);
@@ -524,6 +529,7 @@ pub const Torrent = struct {
                 .torrent = self,
                 .result_buffer = &result_buffer,
                 .result_mutex = &result_mutex,
+                .peer = peers.items[i],
             };
 
             threads[i] = try std.Thread.spawn(.{}, workerThread, .{&contexts[i]});
@@ -533,6 +539,7 @@ pub const Torrent = struct {
         const file = try std.fs.cwd().createFile(output_file, .{});
         defer file.close();
 
+        // Keep track of downloaded pieces
         var downloaded_pieces: usize = 0;
 
         // Process completed pieces and write to file
@@ -564,9 +571,9 @@ pub const Torrent = struct {
     }
 
     /// Makes a handshake and sends initial requests to the peer.
-    fn initPeer(self: @This()) !net.Stream {
+    fn initPeer(self: @This(), peer: Peer) !net.Stream {
         // Make a handshake with the peer.
-        const stream = try self.handshake();
+        const stream = try self.handshakeWithPeer(peer);
         errdefer stream.close();
 
         const writer = stream.writer().any();
