@@ -18,13 +18,18 @@ const ClientVersion = "0001";
 
 const MAX_PIECE_RETRIES = 3;
 
+const File = struct {
+    path: []const u8,
+    length: u32,
+};
+
 const Metadata = struct {
     announce: []const u8,
     created_by: ?[]const u8,
     info_hash: [sha1.digest_length]u8,
     info: struct {
-        length: u32,
-        name: []const u8,
+        files: std.ArrayList(File),
+        total_length: u32,
         piece_length: u32,
         pieces: [][20]u8,
     },
@@ -262,7 +267,8 @@ pub const Torrent = struct {
 
         const raw_data = try utils.readFileIntoString(allocator, file_path);
 
-        var object: bencode.Object = bencode.Object.initFromString(allocator, raw_data) catch {
+        var object: bencode.Object = bencode.Object.initFromString(allocator, raw_data) catch |err| {
+            std.debug.print("Error: {}\n", .{err});
             return error.InvalidTorrentFile;
         };
         defer object.deinit();
@@ -279,6 +285,7 @@ pub const Torrent = struct {
     }
 
     pub fn deinit(self: @This()) void {
+        self.metadata.info.files.deinit();
         self.allocator.free(self.raw_data);
         self.allocator.free(self.metadata.info.pieces);
     }
@@ -302,8 +309,36 @@ pub const Torrent = struct {
         const info_hash = try calculateTokenHash(allocator, info);
         const info_dict = info.dictionary;
 
-        const length = info_dict.get("length") orelse return error.InvalidTorrentFile;
-        const name = info_dict.get("name") orelse return error.InvalidTorrentFile;
+        var files = std.ArrayList(File).init(allocator);
+
+        const files_token = info_dict.get("files");
+        if (files_token) |files_list| {
+            for (files_list.list.items) |file| {
+                const file_dict = file.dictionary;
+                const path = file_dict.get("path") orelse return error.InvalidTorrentFile;
+                const length = file_dict.get("length") orelse return error.InvalidTorrentFile;
+
+                try files.append(File{
+                    // TODO: Concatenate path elements.
+                    .path = path.list.items[0].string,
+                    .length = @as(u32, @intCast(length.integer)),
+                });
+            }
+        } else {
+            const name = info_dict.get("name") orelse return error.InvalidTorrentFile;
+            const length = info_dict.get("length") orelse return error.InvalidTorrentFile;
+
+            try files.append(File{
+                .path = name.string,
+                .length = @as(u32, @intCast(length.integer)),
+            });
+        }
+
+        var total_length: u32 = 0;
+        for (files.items) |file| {
+            total_length += file.length;
+        }
+
         const piece_length = info_dict.get("piece length") orelse return error.InvalidTorrentFile;
         const pieces = info_dict.get("pieces") orelse return error.InvalidTorrentFile;
 
@@ -323,8 +358,8 @@ pub const Torrent = struct {
             .created_by = if (created_by) |cb| cb.string else null,
             .info_hash = info_hash,
             .info = .{
-                .name = name.string,
-                .length = @as(u32, @intCast(length.integer)),
+                .files = files,
+                .total_length = total_length,
                 .piece_length = @as(u32, @intCast(piece_length.integer)),
                 .pieces = piece_list,
             },
@@ -372,7 +407,7 @@ pub const Torrent = struct {
         try query.writer().print("&port={d}", .{6881});
         try query.writer().print("&uploaded={d}", .{0});
         try query.writer().print("&downloaded={d}", .{0});
-        try query.writer().print("&left={d}", .{self.metadata.info.length});
+        try query.writer().print("&left={d}", .{self.metadata.info.total_length});
         try query.writer().print("&compact={d}", .{1});
 
         // Convert the query to a string.
@@ -610,7 +645,7 @@ pub const Torrent = struct {
         // Calculate the piece's length.
         var piece_length = self.metadata.info.piece_length;
         if (piece_index == self.metadata.info.pieces.len - 1) {
-            piece_length = @rem(self.metadata.info.length, self.metadata.info.piece_length);
+            piece_length = @rem(self.metadata.info.total_length, self.metadata.info.piece_length);
         }
 
         const piece_buf = try self.allocator.alloc(u8, piece_length);

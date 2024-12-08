@@ -202,13 +202,15 @@ fn decodeList(allocator: std.mem.Allocator, encoded_value: []const u8) TokenErro
 
     var index: usize = 1;
 
-    while (index < encoded_value.len) {
+    while (encoded_value[index] != 'e' and index < encoded_value.len) {
         const token = try decodeValue(allocator, encoded_value[index..]);
+        index += token.length;
 
         try list.append(token.value);
-
-        index += token.length;
     }
+
+    // Skip the 'e' character.
+    index += 1;
 
     return DecodedToken{ .value = Token{ .list = list }, .length = index };
 }
@@ -230,6 +232,9 @@ fn decodeDictionary(allocator: std.mem.Allocator, encoded_value: []const u8) Tok
 
         try dict.put(key_token.value.string, value_token.value);
     }
+
+    // Skip the 'e' character.
+    index += 1;
 
     return DecodedToken{ .value = Token{ .dictionary = dict }, .length = index };
 }

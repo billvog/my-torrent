@@ -23,12 +23,19 @@ pub const Commands = struct {
         if (metadata.created_by) |created_by| try stdout.print("Created By: {s}\n", .{created_by});
         try stdout.print("Info Hash: {s}\n", .{std.fmt.bytesToHex(metadata.info_hash, .lower)});
         try stdout.print("Info:\n", .{});
-        try stdout.print("  Name: {s}\n", .{metadata.info.name});
-        try stdout.print("  Length: {}\n", .{std.fmt.fmtIntSizeDec(metadata.info.length)});
+        try stdout.print("  Files:\n", .{});
+        for (metadata.info.files.items) |file| {
+            try stdout.print("   - Name: {s}\n", .{file.path});
+            try stdout.print("     Length: {}\n", .{std.fmt.fmtIntSizeDec(file.length)});
+        }
+        try stdout.print("  Total Length: {d}\n", .{std.fmt.fmtIntSizeDec(metadata.info.total_length)});
         try stdout.print("  Piece Length: {d}\n", .{std.fmt.fmtIntSizeDec(metadata.info.piece_length)});
         try stdout.print("  Pieces:\n", .{});
-        for (metadata.info.pieces) |piece| {
+        for (metadata.info.pieces[0..10]) |piece| {
             try stdout.print("    {s}\n", .{std.fmt.bytesToHex(piece[0..20], .lower)});
+        }
+        if (metadata.info.pieces.len > 10) {
+            try stdout.print("    ...\n", .{});
         }
     }
 

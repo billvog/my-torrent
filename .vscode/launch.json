@@ -49,7 +49,7 @@
     {
       "id": "torrentFile",
       "type": "promptString",
-      "default": "./samples/sample.torrent",
+      "default": "./samples/big-buck-bunny.torrent",
       "description": "Path to .torrent file"
     },
     {
