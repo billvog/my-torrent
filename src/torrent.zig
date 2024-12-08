@@ -12,6 +12,7 @@ const net = std.net;
 
 const bencode = @import("bencode.zig");
 const utils = @import("utils.zig");
+const udp = @import("udp.zig");
 
 const ClientAbbreviation: []const u8 = "MT";
 const ClientVersion = "0001";
@@ -52,6 +53,42 @@ const Handshake = extern struct {
     reserved: [8]u8 align(1) = std.mem.zeroes([8]u8),
     info_hash: [20]u8 align(1),
     peer_id: [20]u8 align(1),
+};
+
+const TrackerConnectRequest = extern struct {
+    protocol_id: u64 align(1) = 0x41727101980,
+    action: u32 align(1) = 0,
+    transaction_id: u32 align(1),
+};
+
+const TrackerConnectResponse = extern struct {
+    action: u32 align(1),
+    transaction_id: u32 align(1),
+    connection_id: u64 align(1),
+};
+
+const TrackerAnnounceRequest = extern struct {
+    connection_id: u64 align(1),
+    action: u32 align(1) = 1,
+    transaction_id: u32 align(1),
+    info_hash: [20]u8 align(1),
+    peer_id: [20]u8 align(1),
+    downloaded: u64 align(1),
+    left: u64 align(1),
+    uploaded: u64 align(1),
+    event: u32 align(1) = 0,
+    ip: u32 align(1) = 0,
+    key: u32 align(1) = 0,
+    num_want: i32 align(1) = -1,
+    port: u16 align(1),
+};
+
+const TrackerAnnounceResponse = extern struct {
+    action: u32 align(1),
+    transaction_id: u32 align(1),
+    interval: u32 align(1),
+    leechers: u32 align(1),
+    seeders: u32 align(1),
 };
 
 const PeerMessageType = enum(u8) {
@@ -390,6 +427,72 @@ pub const Torrent = struct {
 
     /// Makes a GET request to the tracker URL to fetch peers.
     fn fetchPeers(self: @This()) !std.ArrayList(u8) {
+        if (std.mem.eql(u8, self.metadata.announce[0..4], "http")) {
+            return try self.fetchPeersHttp();
+        }
+
+        return try self.fetchPeersUDP();
+    }
+
+    fn fetchPeersUDP(self: @This()) !std.ArrayList(u8) {
+        // TODO: Don't hardcode the tracker URL.
+        const announce = utils.splitHostPort("udp://tracker.opentrackr.org:1337") catch {
+            return error.InvalidTrackerURL;
+        };
+
+        const address_list = try net.getAddressList(self.allocator, announce.host, announce.port);
+        defer address_list.deinit();
+
+        const address = address_list.addrs[0];
+
+        var stream = try udp.udpConnectToAddress(address);
+        defer stream.close();
+
+        const writer = stream.writer();
+        const reader = stream.reader();
+
+        std.debug.print("Attemping connection with tracker...\n", .{});
+
+        var transaction_id = std.crypto.random.int(u32);
+
+        // Send connect request.
+        try writer.writeStructEndian(TrackerConnectRequest{ .transaction_id = transaction_id }, .big);
+
+        // Receive connect response.
+        const response = try reader.readStructEndian(TrackerConnectResponse, .big);
+        if (response.transaction_id != transaction_id) {
+            return error.InvalidTrackerResponse;
+        }
+
+        std.debug.print("Connected to tracker:\n", .{});
+        std.debug.print("  Connection ID: {}\n", .{response.connection_id});
+
+        transaction_id = std.crypto.random.int(u32);
+
+        // Send announce request.
+        try writer.writeStructEndian(TrackerAnnounceRequest{
+            .connection_id = response.connection_id,
+            .transaction_id = transaction_id,
+            .info_hash = self.metadata.info_hash,
+            .peer_id = self.peer_id,
+            .downloaded = 0,
+            .left = self.metadata.info.total_length,
+            .uploaded = 0,
+            .port = 6881,
+        }, .big);
+
+        // Receive announce response.
+        const announce_response = try reader.readStructEndian(TrackerAnnounceResponse, .big);
+        if (announce_response.transaction_id != transaction_id) {
+            return error.InvalidTrackerResponse;
+        }
+
+        // TODO: Extract peers from response.
+
+        return std.ArrayList(u8).init(self.allocator);
+    }
+
+    fn fetchPeersHttp(self: @This()) !std.ArrayList(u8) {
         var client = http.Client{ .allocator = self.allocator };
         defer client.deinit();
 

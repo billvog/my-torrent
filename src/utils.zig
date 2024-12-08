@@ -37,3 +37,22 @@ pub fn generateRandomString(allocator: std.mem.Allocator, size: usize) ![]const 
 
     return result;
 }
+
+pub fn splitHostPort(url: []const u8) !struct { host: []const u8, port: u16 } {
+    // Find protocol separator
+    const proto_end = std.mem.indexOf(u8, url, "://") orelse return error.InvalidUrl;
+    const host_start = proto_end + 3;
+
+    // Find port separator
+    const port_sep = std.mem.lastIndexOf(u8, url[host_start..], ":") orelse return error.NoPort;
+    const port_start = host_start + port_sep + 1;
+
+    // Extract hostname and port
+    const hostname = url[host_start .. host_start + port_sep];
+    const port = try std.fmt.parseInt(u16, url[port_start..], 10);
+
+    return .{
+        .host = hostname,
+        .port = port,
+    };
+}
