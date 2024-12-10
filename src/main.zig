@@ -42,10 +42,6 @@ pub fn main() !void {
     else if (std.mem.eql(u8, command, "peers")) {
         try commands.printTorrentPeers(allocator, file_path.?);
     }
-    // Perform a handshake with the torrent.
-    else if (std.mem.eql(u8, command, "handshake")) {
-        try commands.performTorrentHandshake(allocator, file_path.?);
-    }
     // Download a piece of the torrent
     else if (std.mem.eql(u8, command, "download")) {
         if (args.len < 6) {
@@ -79,9 +75,6 @@ fn printUsage(exe: []const u8) !void {
         \\
         \\   peers .................... Print the peers of the torrent.
         \\                              This fetches the peers from the tracker, prints them and exits.
-        \\
-        \\   handshake ................ Perform a handshake with one peer.
-        \\                              This fetches the peers from the tracker, tries to perform a handshake with one of them and exits.
         \\
         \\   download ................. Download torrent and save it to *output file*.
         \\
