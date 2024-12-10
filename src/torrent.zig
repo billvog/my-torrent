@@ -40,6 +40,7 @@ const Metadata = struct {
 const Peer = struct {
     ip: [4]u8,
     port: u16,
+    peer_id: ?[20]u8,
 
     pub fn toSlice(self: @This(), allocator: std.mem.Allocator) ![]const u8 {
         return try std.fmt.allocPrint(allocator, "{d}.{d}.{d}.{d}:{d}", .{ self.ip[0], self.ip[1], self.ip[2], self.ip[3], self.port });
@@ -250,7 +251,10 @@ fn trackerWorkerThread(context: *TrackerWorkerContext) !void {
             // If the url is invalid, or the protocol is not supported,
             // continue to the next tracker without re-queuing.
             switch (err) {
-                error.InvalidTrackerURL, error.UnsupportedTrackerProtocol => {
+                error.InvalidURL,
+                error.InvalidTrackerURL,
+                error.UnsupportedTrackerProtocol,
+                => {
                     continue;
                 },
                 else => {},
@@ -625,10 +629,10 @@ pub const Torrent = struct {
     /// Connects to the tracker and fetches the peers.
     fn fetchPeers(self: @This(), announce: []const u8) !Peers {
         const url_split = utils.splitHostPort(announce) catch {
-            return error.InvalidTrackerURL;
+            return error.InvalidURL;
         };
 
-        if (std.mem.eql(u8, url_split.proto, "http")) {
+        if (std.mem.eql(u8, url_split.proto, "http") or std.mem.eql(u8, url_split.proto, "https")) {
             return try self.fetchPeersHttp(announce);
         } else if (std.mem.eql(u8, url_split.proto, "udp")) {
             return try self.fetchPeersUDP(announce);
@@ -706,10 +710,10 @@ pub const Torrent = struct {
         std.debug.print("  Seeders: {}\n", .{seeders});
 
         // Read peers.
-        var peers: [6 * 10]u8 = undefined;
-        _ = try reader.read(&peers);
+        // var peers: [6 * 10]u8 = undefined;
+        // _ = try reader.read(&peers);
 
-        std.debug.print("Peer: {s}\n", .{std.fmt.bytesToHex(peers, .lower)});
+        // std.debug.print("Peer: {s}\n", .{std.fmt.bytesToHex(peers, .lower)});
 
         return std.ArrayList(Peer).init(self.allocator);
     }
@@ -746,7 +750,7 @@ pub const Torrent = struct {
         var response = std.ArrayList(u8).init(self.allocator);
         defer response.deinit();
 
-        std.debug.print("Fetching peers from tracker: {s}...\n", .{announce});
+        std.debug.print("Attemping connection with tracker: {s}...\n", .{announce});
 
         // Make the GET request.
         const request = try client.fetch(.{ .method = .GET, .location = .{ .uri = uri }, .response_storage = .{ .dynamic = &response } });
@@ -772,27 +776,68 @@ pub const Torrent = struct {
         }
 
         // Extract the peers key from the dict.
-        const peers = object.root.dictionary.get("peers") orelse return error.InvalidTrackerResponse;
+        const peers_token = object.root.dictionary.get("peers") orelse return error.InvalidTrackerResponse;
 
         // The peers key should be a string. We will parse it as a list of 6-byte strings.
-        var peer_list = Peers.init(self.allocator);
-        errdefer peer_list.deinit();
+        var peers = Peers.init(self.allocator);
+        errdefer peers.deinit();
 
-        var pieces_window = std.mem.window(u8, peers.string, 6, 6);
-        while (pieces_window.next()) |piece| {
-            var ip: [4]u8 = undefined;
-            @memcpy(&ip, piece[0..4]);
+        switch (peers_token) {
+            .string => |peer_str| {
+                var pieces_window = std.mem.window(u8, peer_str, 6, 6);
+                while (pieces_window.next()) |piece| {
+                    var ip: [4]u8 = undefined;
+                    @memcpy(&ip, piece[0..4]);
 
-            // Convert the port from big-endian to little-endian.
-            const port = @as(u16, piece[4]) << 8 | piece[5];
+                    // Convert the port from big-endian to little-endian.
+                    const port = @as(u16, piece[4]) << 8 | piece[5];
 
-            try peer_list.append(Peer{
-                .ip = ip,
-                .port = port,
-            });
+                    try peers.append(Peer{
+                        .ip = ip,
+                        .port = port,
+                        .peer_id = null,
+                    });
+                }
+            },
+            .list => |peer_list| {
+                for (peer_list.items) |peer| {
+                    if (peer != .dictionary) {
+                        return error.InvalidTrackerResponse;
+                    }
+
+                    const ip_token = peer.dictionary.get("ip") orelse return error.InvalidTrackerResponse;
+                    const port_token = peer.dictionary.get("port") orelse return error.InvalidTrackerResponse;
+                    const peer_id_token = peer.dictionary.get("peer id");
+
+                    if (ip_token != .string or port_token != .integer) {
+                        return error.InvalidTrackerResponse;
+                    }
+
+                    var ip: [4]u8 = undefined;
+                    @memcpy(&ip, ip_token.string[0..4]);
+
+                    const port = @as(u16, @intCast(port_token.integer));
+
+                    var peer_id: [20]u8 = undefined;
+                    if (peer_id_token) |id| {
+                        if (id != .string) {
+                            return error.InvalidTrackerResponse;
+                        }
+
+                        @memcpy(&peer_id, id.string[0..20]);
+                    }
+
+                    try peers.append(Peer{
+                        .ip = ip,
+                        .port = port,
+                        .peer_id = peer_id,
+                    });
+                }
+            },
+            else => return error.InvalidTrackerResponse,
         }
 
-        return peer_list;
+        return peers;
     }
 
     /// Performs a handshake with the torrent.
