@@ -17,6 +17,7 @@ const udp = @import("udp.zig");
 const ClientAbbreviation: []const u8 = "MT";
 const ClientVersion = "0001";
 
+const MAX_TRACKER_RETRIES = 3;
 const MAX_PIECE_RETRIES = 3;
 
 const File = struct {
@@ -25,7 +26,7 @@ const File = struct {
 };
 
 const Metadata = struct {
-    announce: []const u8,
+    announce_urls: [][]const u8,
     created_by: ?[]const u8,
     info_hash: [sha1.digest_length]u8,
     info: struct {
@@ -192,6 +193,101 @@ const PeerMessage = union(PeerMessageType) {
     }
 };
 
+const TrackerInfo = struct {
+    url: []const u8,
+    retries: u32,
+};
+
+const TrackerQueue = struct {
+    mutex: std.Thread.Mutex,
+    trackers: std.ArrayList(TrackerInfo),
+    allocator: std.mem.Allocator,
+
+    fn init(allocator: std.mem.Allocator) TrackerQueue {
+        return .{
+            .mutex = .{},
+            .trackers = std.ArrayList(TrackerInfo).init(allocator),
+            .allocator = allocator,
+        };
+    }
+
+    fn deinit(self: *TrackerQueue) void {
+        self.trackers.deinit();
+    }
+
+    fn push(self: *TrackerQueue, tracker: TrackerInfo) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        try self.trackers.append(tracker);
+    }
+
+    fn pop(self: *TrackerQueue) ?TrackerInfo {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.trackers.items.len == 0) return null;
+        return self.trackers.orderedRemove(0);
+    }
+};
+
+const TrackerWorkerContext = struct {
+    queue: *TrackerQueue,
+    torrent: *Torrent,
+    result_buffer: *std.ArrayList(Peer),
+    result_mutex: *std.Thread.Mutex,
+};
+
+fn trackerWorkerThread(context: *TrackerWorkerContext) !void {
+    while (true) {
+        // Get next tracker from queue
+        const tracker = context.queue.pop() orelse break;
+
+        std.debug.print("Connecting to tracker: {s}\n", .{tracker.url});
+
+        // Fetch peers from tracker
+        const peers = context.torrent.fetchPeers(tracker.url) catch |err| {
+            std.debug.print("Error connecting to tracker: {s}: {}\n", .{ tracker.url, err });
+
+            // If the url is invalid, or the protocol is not supported,
+            // continue to the next tracker without re-queuing.
+            switch (err) {
+                error.InvalidTrackerURL, error.UnsupportedTrackerProtocol => {
+                    continue;
+                },
+                else => {},
+            }
+
+            // Re-queue if under max retries
+            // if (tracker.retries < MAX_TRACKER_RETRIES) {
+            //     context.queue.push(.{
+            //         .url = tracker.url,
+            //         .retries = tracker.retries + 1,
+            //     }) catch {
+            //         std.debug.print("Failed to re-queue tracker {s}\n", .{tracker.url});
+            //     };
+            // } else {
+            //     std.debug.print("Tracker {s} failed after {} retries\n", .{ tracker.url, MAX_TRACKER_RETRIES });
+            // }
+
+            // Continue to next tracker
+            continue;
+        };
+        defer peers.deinit();
+
+        // Store the result
+        context.result_mutex.lock();
+        defer {
+            context.result_mutex.unlock();
+            std.time.sleep(100 * std.time.ns_per_ms);
+        }
+
+        for (peers.items) |peer| {
+            context.result_buffer.append(peer) catch {
+                std.debug.print("Failed to append peer to result buffer\n", .{});
+            };
+        }
+    }
+}
+
 const PieceInfo = struct {
     index: u32,
     retries: u32,
@@ -238,7 +334,7 @@ const DownloadedPiece = struct {
     }
 };
 
-const WorkerContext = struct {
+const PieceWorkerContext = struct {
     queue: *PieceQueue,
     torrent: *Torrent,
     result_buffer: *std.ArrayList(DownloadedPiece),
@@ -247,7 +343,7 @@ const WorkerContext = struct {
     stream: ?net.Stream = null,
 };
 
-fn workerThread(context: *WorkerContext) void {
+fn pieceWorkerThread(context: *PieceWorkerContext) void {
     context.stream = context.torrent.initPeer(context.peer) catch |err| {
         std.debug.print("Failed to init peer: {}\n", .{err});
         return;
@@ -322,8 +418,14 @@ pub const Torrent = struct {
     }
 
     pub fn deinit(self: @This()) void {
+        for (self.metadata.info.files.items) |file| {
+            self.allocator.free(file.path);
+        }
         self.metadata.info.files.deinit();
+
         self.allocator.free(self.raw_data);
+
+        self.allocator.free(self.metadata.announce_urls);
         self.allocator.free(self.metadata.info.pieces);
     }
 
@@ -339,7 +441,43 @@ pub const Torrent = struct {
     /// Extracts the metadata from the root bencoded token of the .torrent file.
     fn metadataFromToken(allocator: std.mem.Allocator, token: bencode.Token) !Metadata {
         const dict = token.dictionary;
-        const tracker_url = dict.get("announce") orelse return error.InvalidTorrentFile;
+
+        var announce_urls = std.ArrayList([]const u8).init(allocator);
+        defer announce_urls.deinit();
+
+        const announce = dict.get("announce") orelse return error.InvalidTorrentFile;
+        if (announce != .string) {
+            return error.InvalidTorrentFile;
+        }
+
+        try announce_urls.append(announce.string);
+
+        const announce_list = dict.get("announce-list");
+        if (announce_list) |list| {
+            if (list != .list) {
+                return error.InvalidTorrentFile;
+            }
+
+            for (list.list.items) |item| {
+                if (item != .list) {
+                    return error.InvalidTorrentFile;
+                }
+
+                for (item.list.items) |url| {
+                    if (url != .string) {
+                        return error.InvalidTorrentFile;
+                    }
+
+                    // Skip duplicates
+                    if (std.mem.eql(u8, url.string, announce.string)) {
+                        continue;
+                    }
+
+                    try announce_urls.append(url.string);
+                }
+            }
+        }
+
         const created_by = dict.get("created by");
         const info = dict.get("info") orelse return error.InvalidTorrentFile;
 
@@ -355,9 +493,22 @@ pub const Torrent = struct {
                 const path = file_dict.get("path") orelse return error.InvalidTorrentFile;
                 const length = file_dict.get("length") orelse return error.InvalidTorrentFile;
 
+                var assembled_path = std.ArrayList(u8).init(allocator);
+                defer assembled_path.deinit();
+
+                for (path.list.items, 0..) |path_element, i| {
+                    if (path_element != .string) {
+                        return error.InvalidTorrentFile;
+                    }
+
+                    try assembled_path.appendSlice(path_element.string);
+                    if (i < path.list.items.len - 1) {
+                        try assembled_path.append('/');
+                    }
+                }
+
                 try files.append(File{
-                    // TODO: Concatenate path elements.
-                    .path = path.list.items[0].string,
+                    .path = try assembled_path.toOwnedSlice(),
                     .length = @as(u32, @intCast(length.integer)),
                 });
             }
@@ -391,7 +542,7 @@ pub const Torrent = struct {
         }
 
         return Metadata{
-            .announce = tracker_url.string,
+            .announce_urls = try announce_urls.toOwnedSlice(),
             .created_by = if (created_by) |cb| cb.string else null,
             .info_hash = info_hash,
             .info = .{
@@ -414,33 +565,88 @@ pub const Torrent = struct {
         return hash;
     }
 
-    /// Fetches the peers from the tracker and parses them.
-    pub fn getPeers(self: @This()) !Peers {
-        // Fetch peers from the tracker.
-        const response = try self.fetchPeers();
-        defer response.deinit();
+    /// Fetches peers from trackers, using multiple threads.
+    pub fn getPeers(self: *@This()) !Peers {
+        var tracker_queue = TrackerQueue.init(self.allocator);
+        defer tracker_queue.deinit();
 
-        // Parse the peers.
-        const peer_list = try self.parsePeers(response);
-        return peer_list;
-    }
-
-    /// Makes a GET request to the tracker URL to fetch peers.
-    fn fetchPeers(self: @This()) !std.ArrayList(u8) {
-        if (std.mem.eql(u8, self.metadata.announce[0..4], "http")) {
-            return try self.fetchPeersHttp();
+        // Fill queue with all piece indices
+        for (self.metadata.announce_urls) |url| {
+            try tracker_queue.push(.{
+                .url = url,
+                .retries = 0,
+            });
         }
 
-        return try self.fetchPeersUDP();
+        // Create shared result buffer
+        var result_buffer = std.ArrayList(Peer).init(self.allocator);
+
+        // Mutex for result buffer
+        var result_mutex = std.Thread.Mutex{};
+
+        // One thread per tracker, up to 10.
+        const num_threads = @min(4, self.metadata.announce_urls.len);
+
+        // Allocate worker threads
+        var threads = try self.allocator.alloc(std.Thread, num_threads);
+        defer self.allocator.free(threads);
+
+        // Allocate worker contexts
+        var contexts = try self.allocator.alloc(TrackerWorkerContext, num_threads);
+        defer self.allocator.free(contexts);
+
+        for (0..num_threads) |i| {
+            contexts[i] = .{
+                .queue = &tracker_queue,
+                .torrent = self,
+                .result_buffer = &result_buffer,
+                .result_mutex = &result_mutex,
+            };
+
+            threads[i] = try std.Thread.spawn(.{}, trackerWorkerThread, .{&contexts[i]});
+        }
+
+        while (true) {
+            if (result_buffer.items.len > 1) {
+                break;
+            }
+
+            std.time.sleep(10 * std.time.ns_per_ms);
+        }
+
+        // Wait for all threads to complete
+        for (threads) |thread| {
+            thread.join();
+        }
+
+        return result_buffer;
     }
 
-    fn fetchPeersUDP(self: @This()) !std.ArrayList(u8) {
-        // TODO: Don't hardcode the tracker URL.
-        const announce = utils.splitHostPort("udp://tracker.opentrackr.org:1337") catch {
+    /// Connects to the tracker and fetches the peers.
+    fn fetchPeers(self: @This(), announce: []const u8) !Peers {
+        const url_split = utils.splitHostPort(announce) catch {
             return error.InvalidTrackerURL;
         };
 
-        const address_list = try net.getAddressList(self.allocator, announce.host, announce.port);
+        if (std.mem.eql(u8, url_split.proto, "http")) {
+            return try self.fetchPeersHttp(announce);
+        } else if (std.mem.eql(u8, url_split.proto, "udp")) {
+            return try self.fetchPeersUDP(announce);
+        } else {
+            return error.UnsupportedTrackerProtocol;
+        }
+    }
+
+    fn fetchPeersUDP(self: @This(), announce: []const u8) !Peers {
+        const announce_split = utils.splitHostPort(announce) catch {
+            return error.InvalidTrackerURL;
+        };
+
+        if (announce_split.port == null) {
+            return error.InvalidTrackerURL;
+        }
+
+        const address_list = try net.getAddressList(self.allocator, announce_split.host, announce_split.port.?);
         defer address_list.deinit();
 
         const address = address_list.addrs[0];
@@ -451,7 +657,7 @@ pub const Torrent = struct {
         const writer = stream.writer();
         const reader = stream.reader();
 
-        std.debug.print("Attemping connection with tracker...\n", .{});
+        std.debug.print("Attemping connection with tracker: {s}...\n", .{announce});
 
         var transaction_id = std.crypto.random.int(u32);
 
@@ -460,14 +666,16 @@ pub const Torrent = struct {
 
         // Receive connect response.
         const response = try reader.readStructEndian(TrackerConnectResponse, .big);
-        if (response.transaction_id != transaction_id) {
+        if (response.transaction_id != transaction_id or response.action != 0) {
             return error.InvalidTrackerResponse;
         }
 
         std.debug.print("Connected to tracker:\n", .{});
+        std.debug.print("  Tracker: {s}\n", .{announce});
         std.debug.print("  Connection ID: {}\n", .{response.connection_id});
 
         transaction_id = std.crypto.random.int(u32);
+        const key = std.crypto.random.int(u32);
 
         // Send announce request.
         try writer.writeStructEndian(TrackerAnnounceRequest{
@@ -475,29 +683,43 @@ pub const Torrent = struct {
             .transaction_id = transaction_id,
             .info_hash = self.metadata.info_hash,
             .peer_id = self.peer_id,
+            .key = key,
+            .event = 2,
             .downloaded = 0,
             .left = self.metadata.info.total_length,
             .uploaded = 0,
             .port = 6881,
+            .num_want = 10,
         }, .big);
 
         // Receive announce response.
         const announce_response = try reader.readStructEndian(TrackerAnnounceResponse, .big);
-        if (announce_response.transaction_id != transaction_id) {
+        if (announce_response.transaction_id != transaction_id or announce_response.action != 1) {
             return error.InvalidTrackerResponse;
         }
 
-        // TODO: Extract peers from response.
+        const seeders = announce_response.seeders;
 
-        return std.ArrayList(u8).init(self.allocator);
+        std.debug.print("Announce:\n", .{});
+        std.debug.print("  Tracker: {s}\n", .{announce});
+        std.debug.print("  Interval: {}\n", .{announce_response.interval});
+        std.debug.print("  Seeders: {}\n", .{seeders});
+
+        // Read peers.
+        var peers: [6 * 10]u8 = undefined;
+        _ = try reader.read(&peers);
+
+        std.debug.print("Peer: {s}\n", .{std.fmt.bytesToHex(peers, .lower)});
+
+        return std.ArrayList(Peer).init(self.allocator);
     }
 
-    fn fetchPeersHttp(self: @This()) !std.ArrayList(u8) {
+    fn fetchPeersHttp(self: @This(), announce: []const u8) !Peers {
         var client = http.Client{ .allocator = self.allocator };
         defer client.deinit();
 
         // Parse the tracker's URL.
-        var uri = std.Uri.parse(self.metadata.announce) catch {
+        var uri = std.Uri.parse(announce) catch {
             return error.InvalidTrackerURL;
         };
 
@@ -522,7 +744,9 @@ pub const Torrent = struct {
 
         // Allocate a buffer to store the response.
         var response = std.ArrayList(u8).init(self.allocator);
-        errdefer response.deinit();
+        defer response.deinit();
+
+        std.debug.print("Fetching peers from tracker: {s}...\n", .{announce});
 
         // Make the GET request.
         const request = try client.fetch(.{ .method = .GET, .location = .{ .uri = uri }, .response_storage = .{ .dynamic = &response } });
@@ -530,13 +754,14 @@ pub const Torrent = struct {
             return error.TrackerRequestFailed;
         }
 
-        return response;
+        const peers = try self.parsePeers(response.items);
+        return peers;
     }
 
     /// Given the raw response from the tracker, parses the peers.
-    fn parsePeers(self: @This(), raw_response: std.ArrayList(u8)) !Peers {
+    fn parsePeers(self: @This(), raw_response: []u8) !Peers {
         // Decode response.
-        const object = bencode.Object.initFromString(self.allocator, raw_response.items) catch {
+        const object = bencode.Object.initFromString(self.allocator, raw_response) catch {
             return error.InvalidTrackerResponse;
         };
         defer object.deinit();
@@ -571,7 +796,7 @@ pub const Torrent = struct {
     }
 
     /// Performs a handshake with the torrent.
-    pub fn handshake(self: @This()) !net.Stream {
+    pub fn handshake(self: *@This()) !net.Stream {
         // Get the peers.
         const peers = try self.getPeers();
         defer peers.deinit();
@@ -658,7 +883,7 @@ pub const Torrent = struct {
         defer self.allocator.free(threads);
 
         // Allocate worker contexts
-        var contexts = try self.allocator.alloc(WorkerContext, num_threads);
+        var contexts = try self.allocator.alloc(PieceWorkerContext, num_threads);
         defer self.allocator.free(contexts);
 
         for (0..num_threads) |i| {
@@ -670,7 +895,7 @@ pub const Torrent = struct {
                 .peer = peers.items[i],
             };
 
-            threads[i] = try std.Thread.spawn(.{}, workerThread, .{&contexts[i]});
+            threads[i] = try std.Thread.spawn(.{}, pieceWorkerThread, .{&contexts[i]});
         }
 
         // Open output file in main thread

@@ -19,7 +19,10 @@ pub const Commands = struct {
 
         const metadata = my_torrent.metadata;
 
-        try stdout.print("Tracker URL: {s}\n", .{metadata.announce});
+        try stdout.print("Tracker URLs:\n", .{});
+        for (metadata.announce_urls) |announce| {
+            try stdout.print("  {s}\n", .{announce});
+        }
         if (metadata.created_by) |created_by| try stdout.print("Created By: {s}\n", .{created_by});
         try stdout.print("Info Hash: {s}\n", .{std.fmt.bytesToHex(metadata.info_hash, .lower)});
         try stdout.print("Info:\n", .{});
@@ -41,11 +44,10 @@ pub const Commands = struct {
 
     /// Print the peers of the torrent.
     pub fn printTorrentPeers(allocator: std.mem.Allocator, file_path: []const u8) !void {
-        const my_torrent = try openTorrentFile(allocator, file_path);
+        var my_torrent = try openTorrentFile(allocator, file_path);
         defer my_torrent.deinit();
 
-        try stdout.print("Tracker URL: {s}\n", .{my_torrent.metadata.announce});
-        try stdout.print("Fetching peers from tracker...\n", .{});
+        try stdout.print("Fetching peers from trackers...\n", .{});
 
         const peers = try my_torrent.getPeers();
         defer peers.deinit();
@@ -62,10 +64,9 @@ pub const Commands = struct {
 
     /// Perform a handshake with the torrent.
     pub fn performTorrentHandshake(allocator: std.mem.Allocator, file_path: []const u8) !void {
-        const my_torrent = try openTorrentFile(allocator, file_path);
+        var my_torrent = try openTorrentFile(allocator, file_path);
         defer my_torrent.deinit();
 
-        try stdout.print("Tracker URL: {s}\n", .{my_torrent.metadata.announce});
         try stdout.print("Performing handshake...\n", .{});
 
         var stream = my_torrent.handshake() catch |err| {
@@ -80,7 +81,6 @@ pub const Commands = struct {
         var my_torrent = try openTorrentFile(allocator, file_path);
         defer my_torrent.deinit();
 
-        try stdout.print("Tracker URL: {s}\n", .{my_torrent.metadata.announce});
         try stdout.print("Downloading torrent...\n", .{});
 
         try my_torrent.download(output_file);
