@@ -73,7 +73,10 @@ pub const Commands = struct {
         try stdout.print("Downloading torrent...\n", .{});
 
         var client = Client.init(allocator, &torrent);
-        try client.download(output_file);
+        client.download(output_file) catch |err| {
+            try stderr.print("Error: Failed to download: {}\n", .{err});
+            std.process.exit(1);
+        };
     }
 
     /// Opens torrent file and displays an error message if it fails.

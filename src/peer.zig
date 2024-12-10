@@ -153,6 +153,11 @@ pub const Peer = struct {
 
     /// Makes a handshake and sends initial requests to the peer.
     pub fn connect(self: @This()) !std.net.Stream {
+        const peer_str = try self.toSlice(self.allocator);
+        defer self.allocator.free(peer_str);
+
+        std.debug.print("Connecting to peer: {s}\n", .{peer_str});
+
         // Make a handshake with the peer.
         var stream = try self.handshake();
         errdefer stream.close();

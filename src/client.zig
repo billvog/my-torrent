@@ -5,7 +5,14 @@ const tracker = @import("tracker.zig");
 const peer = @import("peer.zig");
 const piece = @import("piece.zig");
 
-const MAX_DOWNLOAD_THREADS = 4;
+const MAX_DOWNLOAD_THREADS = 10;
+
+const FileHandle = struct {
+    file: std.fs.File,
+    path: []const u8,
+};
+
+const FileHandles = std.AutoHashMap(usize, FileHandle);
 
 pub const Client = struct {
     allocator: std.mem.Allocator,
@@ -20,7 +27,6 @@ pub const Client = struct {
         var tracker_queue = tracker.Queue.init(self.allocator);
         defer tracker_queue.deinit();
 
-        // Fill queue with all piece indices
         for (self.torrent.metadata.announce_urls) |url| {
             try tracker_queue.push(.{
                 .tracker = tracker.Tracker{
@@ -76,10 +82,48 @@ pub const Client = struct {
         return result_buffer;
     }
 
+    fn initFileHandles(self: @This(), output_folder: []const u8) !FileHandles {
+        var file_handles = FileHandles.init(self.allocator);
+        errdefer file_handles.deinit();
+
+        for (self.torrent.metadata.info.files.items, 0..) |file, i| {
+            const path = try std.fs.path.join(self.allocator, &[_][]const u8{ output_folder, file.path });
+            defer self.allocator.free(path);
+
+            // Create file and parent directories
+            if (std.fs.path.dirname(path)) |dir| {
+                try std.fs.cwd().makePath(dir);
+            }
+
+            const file_handle = try std.fs.cwd().createFile(path, .{});
+            errdefer file_handle.close();
+
+            try file_handle.setEndPos(file.length);
+
+            try file_handles.put(i, .{
+                .file = file_handle,
+                .path = try self.allocator.dupe(u8, path),
+            });
+        }
+
+        return file_handles;
+    }
+
+    fn deinitFileHandles(self: @This(), file_handles: *FileHandles) void {
+        var iterator = file_handles.iterator();
+        while (iterator.next()) |entry| {
+            self.allocator.free(entry.value_ptr.path);
+            entry.value_ptr.file.close();
+        }
+        file_handles.deinit();
+    }
+
     /// Downloads the whole torrent using multiple threads.
-    pub fn download(self: *@This(), output_file: []const u8) !void {
+    pub fn download(self: *@This(), output_folder: []const u8) !void {
         var peers = try self.getPeers();
         defer peers.deinit();
+
+        std.debug.print("Received {d} peers. Continue with downloading...\n", .{peers.items.len});
 
         var piece_queue = piece.Queue.init(self.allocator);
         defer piece_queue.deinit();
@@ -127,9 +171,9 @@ pub const Client = struct {
             threads[i] = try std.Thread.spawn(.{}, piece.workerThread, .{&contexts[i]});
         }
 
-        // Open output file in main thread
-        const file = try std.fs.cwd().createFile(output_file, .{});
-        defer file.close();
+        // Open file handles
+        var file_handles = try self.initFileHandles(output_folder);
+        defer self.deinitFileHandles(&file_handles);
 
         // Keep track of downloaded pieces
         var downloaded_pieces: usize = 0;
@@ -144,9 +188,18 @@ pub const Client = struct {
 
                 std.debug.print("Writing piece: {}\n", .{curr_piece.index});
 
-                // Write piece to file at correct offset
-                try file.seekTo(curr_piece.index * self.torrent.metadata.info.piece_length);
-                try file.writeAll(curr_piece.data);
+                const spans = try piece.getPieceFileSpans(self.allocator, self.torrent, curr_piece.index);
+                defer self.allocator.free(spans);
+
+                for (spans) |span| {
+                    const file_handle = file_handles.get(span.file_index);
+                    if (file_handle == null) {
+                        continue;
+                    }
+
+                    try file_handle.?.file.seekTo(span.file_offset);
+                    try file_handle.?.file.writeAll(curr_piece.data[span.piece_offset .. span.piece_offset + span.length]);
+                }
 
                 downloaded_pieces += 1;
             }

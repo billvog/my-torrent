@@ -85,6 +85,7 @@ pub const WorkerContext = struct {
     result_mutex: *std.Thread.Mutex,
 };
 
+// Thread function to fetch peers from trackers.
 pub fn workerThread(context: *WorkerContext) !void {
     while (true) {
         // Get next tracker from queue
