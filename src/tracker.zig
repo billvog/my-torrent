@@ -11,6 +11,7 @@ const Torrent = @import("torrent.zig").Torrent;
 const peer = @import("peer.zig");
 const utils = @import("utils.zig");
 const bencode = @import("bencode.zig");
+const queue = @import("thread_queue.zig");
 
 const TrackerAction = enum(u32) {
     connect = 0,
@@ -67,36 +68,7 @@ const QueuedTracker = struct {
     retries: u32,
 };
 
-pub const TrackerQueue = struct {
-    allocator: std.mem.Allocator,
-    mutex: std.Thread.Mutex,
-    trackers: std.ArrayList(QueuedTracker),
-
-    pub fn init(allocator: std.mem.Allocator) TrackerQueue {
-        return .{
-            .mutex = .{},
-            .trackers = std.ArrayList(QueuedTracker).init(allocator),
-            .allocator = allocator,
-        };
-    }
-
-    pub fn deinit(self: *TrackerQueue) void {
-        self.trackers.deinit();
-    }
-
-    pub fn push(self: *TrackerQueue, tracker: QueuedTracker) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        try self.trackers.append(tracker);
-    }
-
-    pub fn pop(self: *TrackerQueue) ?QueuedTracker {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        if (self.trackers.items.len == 0) return null;
-        return self.trackers.orderedRemove(0);
-    }
-};
+pub const TrackerQueue = queue.Queue(QueuedTracker);
 
 pub const TrackerWorkerContext = struct {
     queue: *TrackerQueue,

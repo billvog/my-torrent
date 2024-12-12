@@ -13,7 +13,7 @@ const peer = @import("peer.zig");
 const piece = @import("piece.zig");
 
 const MAX_TRACKER_THREADS = 4;
-const MAX_DOWNLOAD_THREADS = 10;
+const MAX_DOWNLOAD_THREADS = 20;
 
 const FileHandle = struct {
     file: std.fs.File,
@@ -94,20 +94,33 @@ pub const Client = struct {
 
     /// Downloads the whole torrent using multiple threads.
     pub fn download(self: *@This(), output_folder: []const u8) !void {
-        var peers = try self.getPeers();
+        // var peers = try self.getPeers();
+        // defer peers.deinit();
+
+        const my_tracker = tracker.Tracker{
+            .allocator = self.allocator,
+            .url = "udp://tracker.opentrackr.org:1337",
+            .torrent = self.torrent,
+        };
+
+        var peers = try my_tracker.fetchPeers();
         defer peers.deinit();
 
         std.debug.print("Received {d} peers. Continue with downloading...\n", .{peers.items.len});
+
+        var peer_queue = piece.PeerQueue.init(self.allocator);
+        defer peer_queue.deinit();
+
+        for (peers.items) |*p| {
+            try peer_queue.push(p);
+        }
 
         var piece_queue = piece.DownloadQueue.init(self.allocator);
         defer piece_queue.deinit();
 
         // Fill queue with all piece indices
         for (0..self.torrent.metadata.info.pieces.len) |i| {
-            try piece_queue.push(.{
-                .index = @intCast(i),
-                .retries = 0,
-            });
+            try piece_queue.push(.{ .index = @intCast(i) });
         }
 
         // Create shared result buffer
@@ -135,8 +148,8 @@ pub const Client = struct {
 
         for (0..num_threads) |i| {
             contexts[i] = .{
-                .queue = &piece_queue,
-                .peer = &peers.items[i],
+                .piece_queue = &piece_queue,
+                .peer_queue = &peer_queue,
                 .torrent = self.torrent,
                 .result_buffer = &result_buffer,
                 .result_mutex = &result_mutex,

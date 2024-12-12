@@ -9,44 +9,15 @@ const std = @import("std");
 
 const Torrent = @import("torrent.zig").Torrent;
 const peer = @import("peer.zig");
+const queue = @import("thread_queue.zig");
 
-const MAX_PIECE_RETRIES = 3;
+pub const PeerQueue = queue.Queue(*const peer.Peer);
 
 const QueuedPiece = struct {
     index: u32,
-    retries: u32,
 };
 
-pub const DownloadQueue = struct {
-    allocator: std.mem.Allocator,
-    mutex: std.Thread.Mutex,
-    pieces: std.ArrayList(QueuedPiece),
-
-    pub fn init(allocator: std.mem.Allocator) DownloadQueue {
-        return .{
-            .mutex = .{},
-            .pieces = std.ArrayList(QueuedPiece).init(allocator),
-            .allocator = allocator,
-        };
-    }
-
-    pub fn deinit(self: *DownloadQueue) void {
-        self.pieces.deinit();
-    }
-
-    pub fn push(self: *DownloadQueue, piece: QueuedPiece) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        try self.pieces.append(piece);
-    }
-
-    pub fn pop(self: *DownloadQueue) ?QueuedPiece {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        if (self.pieces.items.len == 0) return null;
-        return self.pieces.orderedRemove(0);
-    }
-};
+pub const DownloadQueue = queue.Queue(QueuedPiece);
 
 pub const DownloadedPiece = struct {
     index: u32,
@@ -58,8 +29,8 @@ pub const DownloadedPiece = struct {
 };
 
 pub const DownloadWorkerContext = struct {
-    queue: *DownloadQueue,
-    peer: *peer.Peer,
+    piece_queue: *DownloadQueue,
+    peer_queue: *PeerQueue,
     torrent: *Torrent,
     result_buffer: *std.ArrayList(DownloadedPiece),
     result_mutex: *std.Thread.Mutex,
@@ -67,32 +38,59 @@ pub const DownloadWorkerContext = struct {
 
 // Thread function to download pieces.
 pub fn downloadWorkerThread(context: *DownloadWorkerContext) void {
-    // Open stream
-    var stream = context.peer.connect() catch |err| {
-        std.debug.print("Failed to init peer: {}\n", .{err});
-        return;
-    };
-    defer stream.close();
+    var curr_peer: ?*const peer.Peer = null;
+    var stream: ?peer.Stream = null;
+
+    // Try to connect to a peer.
+    while (stream == null) {
+        curr_peer = context.peer_queue.pop();
+        if (curr_peer == null) {
+            // No more peers to try
+            std.debug.print("No more peers to try\n", .{});
+            return;
+        }
+
+        stream = curr_peer.?.connect() catch |err| {
+            std.debug.print("Failed to connect to peer: {}\n", .{err});
+
+            // Re-queue peer
+            context.peer_queue.push(curr_peer.?) catch {
+                std.debug.print("Failed to re-queue peer\n", .{});
+            };
+
+            continue;
+        };
+    }
+
+    defer stream.?.close();
+
+    var last_keepalive = std.time.milliTimestamp();
 
     while (true) {
+        // Send keepalive every 2 minutes
+        if (std.time.milliTimestamp() - last_keepalive > 2 * std.time.ms_per_s) {
+            curr_peer.?.keepAlive(&stream.?) catch |err| {
+                std.debug.print("Error sending keepalive: {}\n", .{err});
+            };
+            last_keepalive = std.time.milliTimestamp();
+        }
+
         // Get next piece from queue
-        const piece_info = context.queue.pop() orelse break;
+        const piece_info = context.piece_queue.pop() orelse break;
 
         // Download the piece
-        const piece_data = context.peer.downloadPiece(&stream, piece_info.index) catch |err| {
+        const piece_data = curr_peer.?.downloadPiece(&stream.?, piece_info.index) catch |err| {
+            if (err == error.BrokenPipe) {
+                std.debug.print("Peer disconnected\n", .{});
+                break;
+            }
+
             std.debug.print("Error downloading piece: {}: {}\n", .{ piece_info.index, err });
 
-            // Re-queue if under max retries
-            if (piece_info.retries < MAX_PIECE_RETRIES) {
-                context.queue.push(.{
-                    .index = piece_info.index,
-                    .retries = piece_info.retries + 1,
-                }) catch {
-                    std.debug.print("Failed to re-queue piece {}\n", .{piece_info.index});
-                };
-            } else {
-                std.debug.print("Piece {} failed after {} retries\n", .{ piece_info.index, MAX_PIECE_RETRIES });
-            }
+            // Re-queue piece
+            context.piece_queue.push(.{ .index = piece_info.index }) catch {
+                std.debug.print("Failed to re-queue piece {}\n", .{piece_info.index});
+            };
 
             // Continue to next piece
             continue;

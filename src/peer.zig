@@ -8,6 +8,9 @@
 const std = @import("std");
 const sha1 = std.crypto.hash.Sha1;
 
+const network = @import("network");
+pub const Stream = network.Socket;
+
 const Torrent = @import("torrent.zig").Torrent;
 
 const Handshake = extern struct {
@@ -135,11 +138,16 @@ pub const Peer = struct {
     }
 
     /// Performs a handshake with the peer.
-    fn handshake(self: @This()) !std.net.Stream {
-        const address = std.net.Address.initIp4(self.ip, self.port);
+    fn handshake(self: @This()) !Stream {
+        try network.init();
+        defer network.deinit();
 
-        var stream = try std.net.tcpConnectToAddress(address);
+        const address = network.Address{ .ipv4 = .{ .value = self.ip } };
+
+        var stream = try Stream.create(.ipv4, .tcp);
         errdefer stream.close();
+
+        try stream.connect(.{ .address = address, .port = self.port });
 
         const writer = stream.writer();
         const reader = stream.reader();
@@ -160,7 +168,7 @@ pub const Peer = struct {
     }
 
     /// Makes a handshake and sends initial requests to the peer.
-    pub fn connect(self: @This()) !std.net.Stream {
+    pub fn connect(self: @This()) !Stream {
         const peer_str = try self.toSlice(self.allocator);
         defer self.allocator.free(peer_str);
 
@@ -199,8 +207,13 @@ pub const Peer = struct {
         return stream;
     }
 
+    pub fn keepAlive(_: @This(), stream: *Stream) !void {
+        const writer = stream.writer().any();
+        try writer.writeInt(u32, 0, .big);
+    }
+
     /// Download a piece of the torrent.
-    pub fn downloadPiece(self: @This(), stream: *std.net.Stream, piece_index: u32) ![]u8 {
+    pub fn downloadPiece(self: @This(), stream: *Stream, piece_index: u32) ![]u8 {
         // Abbreviate the torrent metadata.
         const torrent_meta = self.torrent.metadata.info;
 
@@ -220,14 +233,14 @@ pub const Peer = struct {
     }
 
     /// Request blocks of a piece from the peer, and verify the hash.
-    fn requestPieceBlocks(self: @This(), stream: *std.net.Stream, piece_index: u32, piece_buf: []u8) !void {
+    fn requestPieceBlocks(self: @This(), stream: *Stream, piece_index: u32, piece_buf: []u8) !void {
         const writer = stream.writer().any();
         const reader = stream.reader().any();
 
         var begin: u32 = 0;
         const block_size = @min(16 * 1024, piece_buf.len);
 
-        std.debug.print("Downloading piece: {} -- block: {}\n", .{ piece_index, block_size });
+        // std.debug.print("Downloading piece: {} -- block: {}\n", .{ piece_index, block_size });
 
         while (begin < piece_buf.len) : (begin += block_size) {
             // Send request for block.
@@ -235,7 +248,7 @@ pub const Peer = struct {
             const request: PeerMessage = .{ .request = .{ .index = piece_index, .begin = begin, .length = cur_block_len } };
             try request.write(writer);
 
-            std.debug.print("Requested block for piece: {} -- begin: {} -- length: {}\n", .{ piece_index, begin, cur_block_len });
+            // std.debug.print("Requested block for piece: {} -- begin: {} -- length: {}\n", .{ piece_index, begin, cur_block_len });
 
             // Receive the block.
             const response: PeerMessage = try PeerMessage.read(self.allocator, reader);
@@ -245,7 +258,7 @@ pub const Peer = struct {
             }
 
             // Add leading space to align with 'requested block' log above.
-            std.debug.print(" Received block for piece: {}\n", .{piece_index});
+            // std.debug.print(" Received block for piece: {}\n", .{piece_index});
 
             // Verify it's the one we requested.
             if (begin != response.piece.begin or cur_block_len != response.piece.block.len) {
