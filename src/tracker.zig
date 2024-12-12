@@ -5,10 +5,10 @@
 // Distributed under the MIT License.
 
 const std = @import("std");
+const network = @import("network");
 
 const Torrent = @import("torrent.zig").Torrent;
 const peer = @import("peer.zig");
-const udp = @import("udp.zig");
 const utils = @import("utils.zig");
 const bencode = @import("bencode.zig");
 
@@ -27,35 +27,35 @@ const TrackerEvent = enum(u32) {
 };
 
 const TrackerConnectRequest = extern struct {
-    protocol_id: u64 align(1) = 0x41727101980,
-    action: TrackerAction align(1) = .connect,
-    transaction_id: u32 align(1),
+    protocol_id: u64 = 0x41727101980,
+    action: u32 = @intFromEnum(TrackerAction.connect),
+    transaction_id: u32,
 };
 
 const TrackerConnectResponse = extern struct {
-    action: TrackerAction align(1),
-    transaction_id: u32 align(1),
-    connection_id: u64 align(1),
+    action: u32,
+    transaction_id: u32,
+    connection_id: u64,
 };
 
 const TrackerAnnounceRequest = extern struct {
-    connection_id: u64 align(1),
-    action: TrackerAction align(1) = .announce,
-    transaction_id: u32 align(1),
-    info_hash: [20]u8 align(1),
-    peer_id: [20]u8 align(1),
-    downloaded: u64 align(1),
-    left: u64 align(1),
-    uploaded: u64 align(1),
-    event: TrackerEvent align(1) = .none,
-    ip: u32 align(1) = 0,
-    key: u32 align(1) = 0,
-    num_want: i32 align(1) = -1,
-    port: u16 align(1),
+    connection_id: u64,
+    action: u32 = @intFromEnum(TrackerAction.announce),
+    transaction_id: u32,
+    info_hash: [20]u8,
+    peer_id: [20]u8,
+    downloaded: u64,
+    left: u64,
+    uploaded: u64,
+    event: u32 = 0,
+    ip: u32 = 0,
+    key: u32 = 0,
+    num_want: i32 = -1,
+    port: u16,
 };
 
 const TrackerAnnounceResponse = extern struct {
-    action: TrackerAction align(1),
+    action: u32 align(1),
     transaction_id: u32 align(1),
     interval: u32 align(1),
     leechers: u32 align(1),
@@ -103,11 +103,12 @@ pub const TrackerWorkerContext = struct {
     torrent: *Torrent,
     result_buffer: *std.ArrayList(peer.Peer),
     result_mutex: *std.Thread.Mutex,
+    should_stop: *std.atomic.Value(bool),
 };
 
 // Thread function to fetch peers from trackers.
-pub fn trackerWorkerThread(context: *TrackerWorkerContext) !void {
-    while (true) {
+pub fn trackerWorkerThread(context: *TrackerWorkerContext) void {
+    while (!context.should_stop.load(.monotonic)) {
         // Get next tracker from queue
         const pack = context.queue.pop() orelse break;
         const tracker = pack.tracker;
@@ -146,6 +147,11 @@ pub fn trackerWorkerThread(context: *TrackerWorkerContext) !void {
             continue;
         };
         defer peers.deinit();
+
+        // Check if we should stop
+        if (context.should_stop.load(.monotonic)) {
+            break;
+        }
 
         context.result_mutex.lock();
         defer context.result_mutex.unlock();
@@ -189,12 +195,10 @@ pub const Tracker = struct {
             return error.InvalidTrackerURL;
         }
 
-        const address_list = try std.net.getAddressList(self.allocator, announce_split.host, announce_split.port.?);
-        defer address_list.deinit();
+        try network.init();
+        defer network.deinit();
 
-        const address = address_list.addrs[0];
-
-        var stream = try udp.udpConnectToAddress(address);
+        var stream = try network.connectToHost(self.allocator, announce_split.host, announce_split.port.?, .udp);
         defer stream.close();
 
         const writer = stream.writer();
@@ -209,7 +213,7 @@ pub const Tracker = struct {
 
         // Receive connect response.
         const response = try reader.readStructEndian(TrackerConnectResponse, .big);
-        if (response.transaction_id != transaction_id or response.action != TrackerAction.connect) {
+        if (response.transaction_id != transaction_id or response.action != @intFromEnum(TrackerAction.connect)) {
             return error.InvalidTrackerResponse;
         }
 
@@ -227,17 +231,20 @@ pub const Tracker = struct {
             .info_hash = self.torrent.metadata.info_hash,
             .peer_id = self.torrent.peer_id,
             .key = key,
-            .event = .started,
+            .event = @intFromEnum(TrackerEvent.started),
             .downloaded = 0,
             .left = self.torrent.metadata.info.total_length,
             .uploaded = 0,
             .port = 6881,
-            .num_want = 10,
         }, .big);
 
         // Receive announce response.
-        const announce_response = try reader.readStructEndian(TrackerAnnounceResponse, .big);
-        if (announce_response.transaction_id != transaction_id or announce_response.action != TrackerAction.announce) {
+        var buf: [1024]u8 = undefined;
+        const bytes_read = try reader.read(buf[0..]);
+        const announce_response: *TrackerAnnounceResponse = @ptrCast(&buf);
+        std.mem.byteSwapAllFields(TrackerAnnounceResponse, &announce_response.*);
+
+        if (announce_response.transaction_id != transaction_id or announce_response.action != @intFromEnum(TrackerAction.announce)) {
             return error.InvalidTrackerResponse;
         }
 
@@ -246,13 +253,30 @@ pub const Tracker = struct {
         std.debug.print("  Interval: {}\n", .{announce_response.interval});
         std.debug.print("  Seeders: {}\n", .{announce_response.seeders});
 
-        // Read peers.
-        // var peers: [6 * 10]u8 = undefined;
-        // _ = try reader.read(&peers);
+        var peers = peer.Peers.init(self.allocator);
 
-        // std.debug.print("Peer: {s}\n", .{std.fmt.bytesToHex(peers, .lower)});
+        const peer_buf = buf[@sizeOf(TrackerAnnounceResponse)..bytes_read];
+        var peer_iterator = std.mem.window(u8, peer_buf, 6, 6);
 
-        return peer.Peers.init(self.allocator);
+        while (peer_iterator.next()) |raw_peer| {
+            var ip: [4]u8 = undefined;
+            @memcpy(&ip, raw_peer[0..4]);
+
+            // Convert the port from big-endian to little-endian.
+            const port = @as(u16, raw_peer[4]) << 8 | raw_peer[5];
+
+            try peers.append(peer.Peer{
+                .allocator = self.allocator,
+                .ip = ip,
+                .port = port,
+                .peer_id = null,
+                .torrent = self.torrent,
+            });
+        }
+
+        std.debug.print("Found {} peers\n", .{peers.items.len});
+
+        return peers;
     }
 
     /// Fetches peers from an HTTP tracker.
@@ -330,7 +354,13 @@ pub const Tracker = struct {
                     // Convert the port from big-endian to little-endian.
                     const port = @as(u16, piece[4]) << 8 | piece[5];
 
-                    try peers.append(peer.Peer{ .allocator = self.allocator, .ip = ip, .port = port, .peer_id = null, .torrent = self.torrent });
+                    try peers.append(peer.Peer{
+                        .allocator = self.allocator,
+                        .ip = ip,
+                        .port = port,
+                        .peer_id = null,
+                        .torrent = self.torrent,
+                    });
                 }
             },
             .list => |peer_list| {

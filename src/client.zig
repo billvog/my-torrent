@@ -51,6 +51,8 @@ pub const Client = struct {
         var result_buffer = peer.Peers.init(self.allocator);
         var result_mutex = std.Thread.Mutex{};
 
+        var should_stop = std.atomic.Value(bool).init(false);
+
         // One thread per tracker, up to X.
         const num_threads = @min(MAX_TRACKER_THREADS, self.torrent.metadata.announce_urls.len);
 
@@ -68,23 +70,24 @@ pub const Client = struct {
                 .torrent = self.torrent,
                 .result_buffer = &result_buffer,
                 .result_mutex = &result_mutex,
+                .should_stop = &should_stop,
             };
 
             threads[i] = try std.Thread.spawn(.{}, tracker.trackerWorkerThread, .{&contexts[i]});
         }
 
         while (true) {
+            defer std.time.sleep(10 * std.time.ns_per_ms);
+
             // If we find at least on peer stop.
             if (result_buffer.items.len > 1) {
+                should_stop.store(true, .release);
                 break;
             }
-
-            std.time.sleep(10 * std.time.ns_per_ms);
         }
 
-        for (threads) |thread| {
-            thread.join();
-        }
+        std.debug.print("Found a total of {} peers. Terminating threads.\n", .{result_buffer.items.len});
+        std.time.sleep(2 * std.time.ns_per_s);
 
         return result_buffer;
     }
