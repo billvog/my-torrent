@@ -36,42 +36,56 @@ pub const DownloadWorkerContext = struct {
     result_mutex: *std.Thread.Mutex,
 };
 
-// Thread function to download pieces.
-pub fn downloadWorkerThread(context: *DownloadWorkerContext) void {
-    var curr_peer: ?*const peer.Peer = null;
-    var stream: ?peer.Stream = null;
+const ConnectedPeer = struct {
+    peer: *const peer.Peer,
+    stream: peer.Stream,
+    failed_attempts: u16,
+};
 
-    // Try to connect to a peer.
-    while (stream == null) {
-        curr_peer = context.peer_queue.pop();
-        if (curr_peer == null) {
-            // No more peers to try
-            std.debug.print("No more peers to try\n", .{});
-            return;
-        }
+/// Connect to a peer from the queue.
+fn connectToPeer(peer_queue: *PeerQueue) !ConnectedPeer {
+    while (true) {
+        const item = peer_queue.pop() orelse return error.NoPeers;
 
-        stream = curr_peer.?.connect() catch |err| {
+        const stream = item.connect() catch |err| {
             std.debug.print("Failed to connect to peer: {}\n", .{err});
 
             // Re-queue peer
-            context.peer_queue.push(curr_peer.?) catch {
+            peer_queue.push(item) catch {
                 std.debug.print("Failed to re-queue peer\n", .{});
             };
 
             continue;
         };
-    }
 
-    defer stream.?.close();
+        return .{
+            .peer = item,
+            .stream = stream,
+            .failed_attempts = 0,
+        };
+    }
+}
+
+// Thread function to download pieces.
+pub fn downloadWorkerThread(context: *DownloadWorkerContext) void {
+    var connected: ?ConnectedPeer = null;
 
     var last_keepalive = std.time.milliTimestamp();
 
     while (true) {
+        if (connected == null) {
+            connected = connectToPeer(context.peer_queue) catch |err| {
+                std.debug.print("No more peers available: {}\n", .{err});
+                break;
+            };
+        }
+
         // Send keepalive every 2 minutes
         if (std.time.milliTimestamp() - last_keepalive > 2 * std.time.ms_per_s) {
-            curr_peer.?.keepAlive(&stream.?) catch |err| {
+            connected.?.peer.keepAlive(&connected.?.stream) catch |err| {
                 std.debug.print("Error sending keepalive: {}\n", .{err});
             };
+
             last_keepalive = std.time.milliTimestamp();
         }
 
@@ -79,7 +93,7 @@ pub fn downloadWorkerThread(context: *DownloadWorkerContext) void {
         const piece_info = context.piece_queue.pop() orelse break;
 
         // Download the piece
-        const piece_data = curr_peer.?.downloadPiece(&stream.?, piece_info.index) catch |err| {
+        const piece_data = connected.?.peer.downloadPiece(&connected.?.stream, piece_info.index) catch |err| {
             if (err == error.BrokenPipe) {
                 std.debug.print("Peer disconnected\n", .{});
                 break;
@@ -91,6 +105,14 @@ pub fn downloadWorkerThread(context: *DownloadWorkerContext) void {
             context.piece_queue.push(.{ .index = piece_info.index }) catch {
                 std.debug.print("Failed to re-queue piece {}\n", .{piece_info.index});
             };
+
+            // If we have too many failed attempts, disconnect peer
+            connected.?.failed_attempts += 1;
+            if (connected.?.failed_attempts >= 3) {
+                std.debug.print("Too many failed attempts, disconnecting peer\n", .{});
+                connected.?.stream.close();
+                connected = null;
+            }
 
             // Continue to next piece
             continue;
