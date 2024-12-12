@@ -1,3 +1,10 @@
+//
+// This file is part of my-torrent, a BitTorrent client written in Zig.
+//
+// Created on 12/12/2024 by Vasilis Voyiadjis.
+// Distributed under the MIT License.
+//
+
 const std = @import("std");
 
 const Torrent = @import("torrent.zig").Torrent;
@@ -5,6 +12,7 @@ const tracker = @import("tracker.zig");
 const peer = @import("peer.zig");
 const piece = @import("piece.zig");
 
+const MAX_TRACKER_THREADS = 4;
 const MAX_DOWNLOAD_THREADS = 10;
 
 const FileHandle = struct {
@@ -24,9 +32,10 @@ pub const Client = struct {
 
     /// Fetches peers from trackers, using multiple threads.
     pub fn getPeers(self: *@This()) !peer.Peers {
-        var tracker_queue = tracker.Queue.init(self.allocator);
+        var tracker_queue = tracker.TrackerQueue.init(self.allocator);
         defer tracker_queue.deinit();
 
+        // Fill the queue with all tracker URLs
         for (self.torrent.metadata.announce_urls) |url| {
             try tracker_queue.push(.{
                 .tracker = tracker.Tracker{
@@ -38,21 +47,19 @@ pub const Client = struct {
             });
         }
 
-        // Create shared result buffer
+        // Create shared result buffer, and mutex
         var result_buffer = peer.Peers.init(self.allocator);
-
-        // Mutex for result buffer
         var result_mutex = std.Thread.Mutex{};
 
-        // One thread per tracker, up to 10.
-        const num_threads = @min(4, self.torrent.metadata.announce_urls.len);
+        // One thread per tracker, up to X.
+        const num_threads = @min(MAX_TRACKER_THREADS, self.torrent.metadata.announce_urls.len);
 
         // Allocate worker threads
         var threads = try self.allocator.alloc(std.Thread, num_threads);
         defer self.allocator.free(threads);
 
         // Allocate worker contexts
-        var contexts = try self.allocator.alloc(tracker.WorkerContext, num_threads);
+        var contexts = try self.allocator.alloc(tracker.TrackerWorkerContext, num_threads);
         defer self.allocator.free(contexts);
 
         for (0..num_threads) |i| {
@@ -63,10 +70,11 @@ pub const Client = struct {
                 .result_mutex = &result_mutex,
             };
 
-            threads[i] = try std.Thread.spawn(.{}, tracker.workerThread, .{&contexts[i]});
+            threads[i] = try std.Thread.spawn(.{}, tracker.trackerWorkerThread, .{&contexts[i]});
         }
 
         while (true) {
+            // If we find at least on peer stop.
             if (result_buffer.items.len > 1) {
                 break;
             }
@@ -74,48 +82,11 @@ pub const Client = struct {
             std.time.sleep(10 * std.time.ns_per_ms);
         }
 
-        // Wait for all threads to complete
         for (threads) |thread| {
             thread.join();
         }
 
         return result_buffer;
-    }
-
-    fn initFileHandles(self: @This(), output_folder: []const u8) !FileHandles {
-        var file_handles = FileHandles.init(self.allocator);
-        errdefer file_handles.deinit();
-
-        for (self.torrent.metadata.info.files.items, 0..) |file, i| {
-            const path = try std.fs.path.join(self.allocator, &[_][]const u8{ output_folder, file.path });
-            defer self.allocator.free(path);
-
-            // Create file and parent directories
-            if (std.fs.path.dirname(path)) |dir| {
-                try std.fs.cwd().makePath(dir);
-            }
-
-            const file_handle = try std.fs.cwd().createFile(path, .{});
-            errdefer file_handle.close();
-
-            try file_handle.setEndPos(file.length);
-
-            try file_handles.put(i, .{
-                .file = file_handle,
-                .path = try self.allocator.dupe(u8, path),
-            });
-        }
-
-        return file_handles;
-    }
-
-    fn deinitFileHandles(self: @This(), file_handles: *FileHandles) void {
-        var iterator = file_handles.iterator();
-        while (iterator.next()) |entry| {
-            self.allocator.free(entry.value_ptr.path);
-            entry.value_ptr.file.close();
-        }
-        file_handles.deinit();
     }
 
     /// Downloads the whole torrent using multiple threads.
@@ -125,7 +96,7 @@ pub const Client = struct {
 
         std.debug.print("Received {d} peers. Continue with downloading...\n", .{peers.items.len});
 
-        var piece_queue = piece.Queue.init(self.allocator);
+        var piece_queue = piece.DownloadQueue.init(self.allocator);
         defer piece_queue.deinit();
 
         // Fill queue with all piece indices
@@ -156,7 +127,7 @@ pub const Client = struct {
         defer self.allocator.free(threads);
 
         // Allocate worker contexts
-        var contexts = try self.allocator.alloc(piece.WorkerContext, num_threads);
+        var contexts = try self.allocator.alloc(piece.DownloadWorkerContext, num_threads);
         defer self.allocator.free(contexts);
 
         for (0..num_threads) |i| {
@@ -168,7 +139,7 @@ pub const Client = struct {
                 .result_mutex = &result_mutex,
             };
 
-            threads[i] = try std.Thread.spawn(.{}, piece.workerThread, .{&contexts[i]});
+            threads[i] = try std.Thread.spawn(.{}, piece.downloadWorkerThread, .{&contexts[i]});
         }
 
         // Open file handles
@@ -180,31 +151,39 @@ pub const Client = struct {
 
         // Process completed pieces and write to file
         while (downloaded_pieces < self.torrent.metadata.info.pieces.len) {
-            if (result_buffer.items.len > 0) {
-                result_mutex.lock();
-                const curr_piece = result_buffer.orderedRemove(0);
-                defer self.allocator.free(curr_piece.data);
-                result_mutex.unlock();
+            // Sleep for some time between iterations
+            defer std.time.sleep(10 * std.time.ns_per_ms);
 
-                std.debug.print("Writing piece: {}\n", .{curr_piece.index});
-
-                const spans = try piece.getPieceFileSpans(self.allocator, self.torrent, curr_piece.index);
-                defer self.allocator.free(spans);
-
-                for (spans) |span| {
-                    const file_handle = file_handles.get(span.file_index);
-                    if (file_handle == null) {
-                        continue;
-                    }
-
-                    try file_handle.?.file.seekTo(span.file_offset);
-                    try file_handle.?.file.writeAll(curr_piece.data[span.piece_offset .. span.piece_offset + span.length]);
-                }
-
-                downloaded_pieces += 1;
+            // Skip if no items in result buffer
+            if (result_buffer.items.len == 0) {
+                continue;
             }
 
-            std.time.sleep(10 * std.time.ns_per_ms);
+            // Pop piece from result buffer
+            result_mutex.lock();
+            const curr_piece = result_buffer.orderedRemove(0);
+            defer self.allocator.free(curr_piece.data);
+            result_mutex.unlock();
+
+            std.debug.print("Writing piece: {}\n", .{curr_piece.index});
+
+            // Try to write piece to disk
+            self.writePieceToDisk(&file_handles, &curr_piece) catch |err| {
+                std.debug.print("Error writing piece to disk: {}\n", .{err});
+
+                result_mutex.lock();
+                defer result_mutex.unlock();
+
+                // Re-queue piece
+                result_buffer.append(curr_piece) catch {
+                    std.debug.print("Error re-queueing piece: {}\n", .{curr_piece.index});
+                };
+
+                continue;
+            };
+
+            // On success, increment downloaded pieces
+            downloaded_pieces += 1;
         }
 
         std.debug.print("Downloaded all pieces. Terminating threads.\n", .{});
@@ -212,6 +191,60 @@ pub const Client = struct {
         // Wait for all threads to complete
         for (threads) |thread| {
             thread.join();
+        }
+    }
+
+    /// Initializes file handles for all files in the torrent, and creates parent directories if needed.
+    fn initFileHandles(self: @This(), output_folder: []const u8) !FileHandles {
+        var file_handles = FileHandles.init(self.allocator);
+        errdefer file_handles.deinit();
+
+        for (self.torrent.metadata.info.files.items, 0..) |file, i| {
+            const path = try std.fs.path.join(self.allocator, &[_][]const u8{ output_folder, file.path });
+            defer self.allocator.free(path);
+
+            // Create file and parent directories
+            if (std.fs.path.dirname(path)) |dir| {
+                try std.fs.cwd().makePath(dir);
+            }
+
+            const file_handle = try std.fs.cwd().createFile(path, .{});
+            errdefer file_handle.close();
+
+            try file_handle.setEndPos(file.length);
+
+            try file_handles.put(i, .{
+                .file = file_handle,
+                .path = try self.allocator.dupe(u8, path),
+            });
+        }
+
+        return file_handles;
+    }
+
+    /// Closes all file handles and frees memory.
+    fn deinitFileHandles(self: @This(), file_handles: *FileHandles) void {
+        var iterator = file_handles.iterator();
+        while (iterator.next()) |entry| {
+            self.allocator.free(entry.value_ptr.path);
+            entry.value_ptr.file.close();
+        }
+        file_handles.deinit();
+    }
+
+    /// Writes a downloaded piece to disk, handling multiple file spans.
+    fn writePieceToDisk(self: @This(), file_handles: *FileHandles, downloaded_piece: *const piece.DownloadedPiece) !void {
+        const spans = try piece.getPieceFileSpans(self.allocator, self.torrent, downloaded_piece.index);
+        defer self.allocator.free(spans);
+
+        for (spans) |span| {
+            const file_handle = file_handles.get(span.file_index);
+            if (file_handle == null) {
+                continue;
+            }
+
+            try file_handle.?.file.seekTo(span.file_offset);
+            try file_handle.?.file.writeAll(downloaded_piece.data[span.piece_offset .. span.piece_offset + span.length]);
         }
     }
 };

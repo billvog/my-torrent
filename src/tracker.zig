@@ -1,3 +1,9 @@
+//
+// This file is part of my-torrent, a BitTorrent client written in Zig.
+//
+// Created on 12/12/2024 by Vasilis Voyiadjis.
+// Distributed under the MIT License.
+
 const std = @import("std");
 
 const Torrent = @import("torrent.zig").Torrent;
@@ -6,28 +12,42 @@ const udp = @import("udp.zig");
 const utils = @import("utils.zig");
 const bencode = @import("bencode.zig");
 
+const TrackerAction = enum(u32) {
+    connect = 0,
+    announce = 1,
+    scrape = 2,
+    _error = 3, // error is a reserved keyword
+};
+
+const TrackerEvent = enum(u32) {
+    none = 0,
+    completed = 1,
+    started = 2,
+    stopped = 3,
+};
+
 const TrackerConnectRequest = extern struct {
     protocol_id: u64 align(1) = 0x41727101980,
-    action: u32 align(1) = 0,
+    action: TrackerAction align(1) = .connect,
     transaction_id: u32 align(1),
 };
 
 const TrackerConnectResponse = extern struct {
-    action: u32 align(1),
+    action: TrackerAction align(1),
     transaction_id: u32 align(1),
     connection_id: u64 align(1),
 };
 
 const TrackerAnnounceRequest = extern struct {
     connection_id: u64 align(1),
-    action: u32 align(1) = 1,
+    action: TrackerAction align(1) = .announce,
     transaction_id: u32 align(1),
     info_hash: [20]u8 align(1),
     peer_id: [20]u8 align(1),
     downloaded: u64 align(1),
     left: u64 align(1),
     uploaded: u64 align(1),
-    event: u32 align(1) = 0,
+    event: TrackerEvent align(1) = .none,
     ip: u32 align(1) = 0,
     key: u32 align(1) = 0,
     num_want: i32 align(1) = -1,
@@ -35,42 +55,42 @@ const TrackerAnnounceRequest = extern struct {
 };
 
 const TrackerAnnounceResponse = extern struct {
-    action: u32 align(1),
+    action: TrackerAction align(1),
     transaction_id: u32 align(1),
     interval: u32 align(1),
     leechers: u32 align(1),
     seeders: u32 align(1),
 };
 
-const TrackerPack = struct {
+const QueuedTracker = struct {
     tracker: Tracker,
     retries: u32,
 };
 
-pub const Queue = struct {
-    mutex: std.Thread.Mutex,
-    trackers: std.ArrayList(TrackerPack),
+pub const TrackerQueue = struct {
     allocator: std.mem.Allocator,
+    mutex: std.Thread.Mutex,
+    trackers: std.ArrayList(QueuedTracker),
 
-    pub fn init(allocator: std.mem.Allocator) Queue {
+    pub fn init(allocator: std.mem.Allocator) TrackerQueue {
         return .{
             .mutex = .{},
-            .trackers = std.ArrayList(TrackerPack).init(allocator),
+            .trackers = std.ArrayList(QueuedTracker).init(allocator),
             .allocator = allocator,
         };
     }
 
-    pub fn deinit(self: *Queue) void {
+    pub fn deinit(self: *TrackerQueue) void {
         self.trackers.deinit();
     }
 
-    pub fn push(self: *Queue, tracker: TrackerPack) !void {
+    pub fn push(self: *TrackerQueue, tracker: QueuedTracker) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
         try self.trackers.append(tracker);
     }
 
-    pub fn pop(self: *Queue) ?TrackerPack {
+    pub fn pop(self: *TrackerQueue) ?QueuedTracker {
         self.mutex.lock();
         defer self.mutex.unlock();
         if (self.trackers.items.len == 0) return null;
@@ -78,15 +98,15 @@ pub const Queue = struct {
     }
 };
 
-pub const WorkerContext = struct {
-    queue: *Queue,
+pub const TrackerWorkerContext = struct {
+    queue: *TrackerQueue,
     torrent: *Torrent,
     result_buffer: *std.ArrayList(peer.Peer),
     result_mutex: *std.Thread.Mutex,
 };
 
 // Thread function to fetch peers from trackers.
-pub fn workerThread(context: *WorkerContext) !void {
+pub fn trackerWorkerThread(context: *TrackerWorkerContext) !void {
     while (true) {
         // Get next tracker from queue
         const pack = context.queue.pop() orelse break;
@@ -127,13 +147,10 @@ pub fn workerThread(context: *WorkerContext) !void {
         };
         defer peers.deinit();
 
-        // Store the result
         context.result_mutex.lock();
-        defer {
-            context.result_mutex.unlock();
-            std.time.sleep(100 * std.time.ns_per_ms);
-        }
+        defer context.result_mutex.unlock();
 
+        // Store the result
         for (peers.items) |p| {
             context.result_buffer.append(p) catch {
                 std.debug.print("Failed to append peer to result buffer\n", .{});
@@ -147,6 +164,7 @@ pub const Tracker = struct {
     url: []const u8,
     torrent: *Torrent,
 
+    // Fetches peers from the tracker (either HTTP or UDP).
     pub fn fetchPeers(self: @This()) !peer.Peers {
         const url_split = utils.splitHostPort(self.url) catch {
             return error.InvalidURL;
@@ -161,6 +179,7 @@ pub const Tracker = struct {
         }
     }
 
+    // Fetches peers from a UDP tracker.
     fn fetchPeersUDP(self: @This(), announce: []const u8) !peer.Peers {
         const announce_split = utils.splitHostPort(announce) catch {
             return error.InvalidTrackerURL;
@@ -190,7 +209,7 @@ pub const Tracker = struct {
 
         // Receive connect response.
         const response = try reader.readStructEndian(TrackerConnectResponse, .big);
-        if (response.transaction_id != transaction_id or response.action != 0) {
+        if (response.transaction_id != transaction_id or response.action != TrackerAction.connect) {
             return error.InvalidTrackerResponse;
         }
 
@@ -208,7 +227,7 @@ pub const Tracker = struct {
             .info_hash = self.torrent.metadata.info_hash,
             .peer_id = self.torrent.peer_id,
             .key = key,
-            .event = 2,
+            .event = .started,
             .downloaded = 0,
             .left = self.torrent.metadata.info.total_length,
             .uploaded = 0,
@@ -218,16 +237,14 @@ pub const Tracker = struct {
 
         // Receive announce response.
         const announce_response = try reader.readStructEndian(TrackerAnnounceResponse, .big);
-        if (announce_response.transaction_id != transaction_id or announce_response.action != 1) {
+        if (announce_response.transaction_id != transaction_id or announce_response.action != TrackerAction.announce) {
             return error.InvalidTrackerResponse;
         }
-
-        const seeders = announce_response.seeders;
 
         std.debug.print("Announce:\n", .{});
         std.debug.print("  Tracker: {s}\n", .{announce});
         std.debug.print("  Interval: {}\n", .{announce_response.interval});
-        std.debug.print("  Seeders: {}\n", .{seeders});
+        std.debug.print("  Seeders: {}\n", .{announce_response.seeders});
 
         // Read peers.
         // var peers: [6 * 10]u8 = undefined;
@@ -238,6 +255,7 @@ pub const Tracker = struct {
         return peer.Peers.init(self.allocator);
     }
 
+    /// Fetches peers from an HTTP tracker.
     fn fetchPeersHttp(self: @This(), announce: []const u8) !peer.Peers {
         var client = std.http.Client{ .allocator = self.allocator };
         defer client.deinit();
@@ -282,7 +300,7 @@ pub const Tracker = struct {
         return peers;
     }
 
-    /// Given the raw response from the tracker, parses the peers.
+    /// Given the raw response from the tracker (bencoded), parses the peers.
     fn parsePeers(self: @This(), raw_response: []u8) !peer.Peers {
         // Decode response.
         const object = bencode.Object.initFromString(self.allocator, raw_response) catch {

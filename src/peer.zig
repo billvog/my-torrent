@@ -1,5 +1,11 @@
-const std = @import("std");
+//
+// This file is part of my-torrent, a BitTorrent client written in Zig.
+//
+// Created on 12/12/2024 by Vasilis Voyiadjis.
+// Distributed under the MIT License.
+//
 
+const std = @import("std");
 const sha1 = std.crypto.hash.Sha1;
 
 const Torrent = @import("torrent.zig").Torrent;
@@ -113,6 +119,8 @@ const PeerMessage = union(PeerMessageType) {
     }
 };
 
+pub const Peers = std.ArrayList(Peer);
+
 pub const Peer = struct {
     allocator: std.mem.Allocator,
 
@@ -191,31 +199,28 @@ pub const Peer = struct {
         return stream;
     }
 
-    pub fn disconnect(self: @This()) void {
-        if (self.stream != null) {
-            self.stream.?.close();
-        }
-    }
-
     /// Download a piece of the torrent.
-    pub fn downloadPiece(self: @This(), stream: *std.net.Stream, torrent: *Torrent, piece_index: u32) ![]u8 {
+    pub fn downloadPiece(self: @This(), stream: *std.net.Stream, piece_index: u32) ![]u8 {
+        // Abbreviate the torrent metadata.
+        const torrent_meta = self.torrent.metadata.info;
+
         // Calculate the piece's length.
-        var curr_piece_length = torrent.metadata.info.piece_length;
-        if (piece_index == torrent.metadata.info.pieces.len - 1) {
-            curr_piece_length = @rem(torrent.metadata.info.total_length, torrent.metadata.info.piece_length);
+        var curr_piece_length = torrent_meta.piece_length;
+        if (piece_index == torrent_meta.pieces.len - 1) {
+            curr_piece_length = @rem(torrent_meta.total_length, torrent_meta.piece_length);
         }
 
         const piece_buf = try self.allocator.alloc(u8, curr_piece_length);
         errdefer self.allocator.free(piece_buf);
 
         // Download the full piece.
-        try self.requestPieceBlocks(stream, piece_index, piece_buf, torrent.metadata.info.pieces[piece_index]);
+        try self.requestPieceBlocks(stream, piece_index, piece_buf);
 
         return piece_buf;
     }
 
     /// Request blocks of a piece from the peer, and verify the hash.
-    fn requestPieceBlocks(self: @This(), stream: *std.net.Stream, piece_index: u32, piece_buf: []u8, piece_hash: [sha1.digest_length]u8) !void {
+    fn requestPieceBlocks(self: @This(), stream: *std.net.Stream, piece_index: u32, piece_buf: []u8) !void {
         const writer = stream.writer().any();
         const reader = stream.reader().any();
 
@@ -251,6 +256,8 @@ pub const Peer = struct {
             @memcpy(piece_buf[begin .. begin + cur_block_len], response.piece.block);
         }
 
+        const piece_hash = self.torrent.metadata.info.pieces[piece_index];
+
         // Once the piece is downloaded, verify the hash.
         var hash: [sha1.digest_length]u8 = undefined;
         sha1.hash(piece_buf, &hash, .{});
@@ -262,5 +269,3 @@ pub const Peer = struct {
         std.debug.print("Downloaded piece: {}\n", .{piece_index});
     }
 };
-
-pub const Peers = std.ArrayList(Peer);

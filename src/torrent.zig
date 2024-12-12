@@ -25,12 +25,14 @@ const Metadata = struct {
     announce_urls: [][]const u8,
     created_by: ?[]const u8,
     info_hash: [sha1.digest_length]u8,
-    info: struct {
+    info: Info,
+
+    const Info = struct {
         files: std.ArrayList(File),
         total_length: u32,
         piece_length: u32,
         pieces: [][20]u8,
-    },
+    };
 };
 
 pub const Torrent = struct {
@@ -38,8 +40,8 @@ pub const Torrent = struct {
 
     peer_id: [20]u8,
 
-    file_path: []const u8,
-    raw_data: []const u8,
+    file_path: []const u8, // Torrent file path
+    raw_data: []const u8, // Torrent file contents
 
     metadata: Metadata,
 

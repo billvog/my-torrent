@@ -1,3 +1,10 @@
+//
+// This file is part of my-torrent, a BitTorrent client written in Zig.
+//
+// Created on 12/12/2024 by Vasilis Voyiadjis.
+// Distributed under the MIT License.
+//
+
 const std = @import("std");
 
 const Torrent = @import("torrent.zig").Torrent;
@@ -5,35 +12,35 @@ const peer = @import("peer.zig");
 
 const MAX_PIECE_RETRIES = 3;
 
-const PieceInfo = struct {
+const QueuedPiece = struct {
     index: u32,
     retries: u32,
 };
 
-pub const Queue = struct {
-    mutex: std.Thread.Mutex,
-    pieces: std.ArrayList(PieceInfo),
+pub const DownloadQueue = struct {
     allocator: std.mem.Allocator,
+    mutex: std.Thread.Mutex,
+    pieces: std.ArrayList(QueuedPiece),
 
-    pub fn init(allocator: std.mem.Allocator) Queue {
+    pub fn init(allocator: std.mem.Allocator) DownloadQueue {
         return .{
             .mutex = .{},
-            .pieces = std.ArrayList(PieceInfo).init(allocator),
+            .pieces = std.ArrayList(QueuedPiece).init(allocator),
             .allocator = allocator,
         };
     }
 
-    pub fn deinit(self: *Queue) void {
+    pub fn deinit(self: *DownloadQueue) void {
         self.pieces.deinit();
     }
 
-    pub fn push(self: *Queue, piece: PieceInfo) !void {
+    pub fn push(self: *DownloadQueue, piece: QueuedPiece) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
         try self.pieces.append(piece);
     }
 
-    pub fn pop(self: *Queue) ?PieceInfo {
+    pub fn pop(self: *DownloadQueue) ?QueuedPiece {
         self.mutex.lock();
         defer self.mutex.unlock();
         if (self.pieces.items.len == 0) return null;
@@ -50,8 +57,8 @@ pub const DownloadedPiece = struct {
     }
 };
 
-pub const WorkerContext = struct {
-    queue: *Queue,
+pub const DownloadWorkerContext = struct {
+    queue: *DownloadQueue,
     peer: *peer.Peer,
     torrent: *Torrent,
     result_buffer: *std.ArrayList(DownloadedPiece),
@@ -59,7 +66,8 @@ pub const WorkerContext = struct {
 };
 
 // Thread function to download pieces.
-pub fn workerThread(context: *WorkerContext) void {
+pub fn downloadWorkerThread(context: *DownloadWorkerContext) void {
+    // Open stream
     var stream = context.peer.connect() catch |err| {
         std.debug.print("Failed to init peer: {}\n", .{err});
         return;
@@ -71,7 +79,7 @@ pub fn workerThread(context: *WorkerContext) void {
         const piece_info = context.queue.pop() orelse break;
 
         // Download the piece
-        const piece_data = context.peer.downloadPiece(&stream, context.torrent, piece_info.index) catch |err| {
+        const piece_data = context.peer.downloadPiece(&stream, piece_info.index) catch |err| {
             std.debug.print("Error downloading piece: {}: {}\n", .{ piece_info.index, err });
 
             // Re-queue if under max retries
@@ -90,10 +98,10 @@ pub fn workerThread(context: *WorkerContext) void {
             continue;
         };
 
-        // Store the result
         context.result_mutex.lock();
         defer context.result_mutex.unlock();
 
+        // Store the result
         context.result_buffer.append(.{
             .index = piece_info.index,
             .data = piece_data,
