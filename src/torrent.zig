@@ -51,7 +51,7 @@ pub const Torrent = struct {
 
         // Parse the bencoded data.
         var object: bencode.Object = bencode.Object.initFromString(allocator, raw_data) catch |err| {
-            std.debug.print("Error: {}\n", .{err});
+            std.log.err("Error: {}", .{err});
             return error.InvalidTorrentFile;
         };
         defer object.deinit();

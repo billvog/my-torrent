@@ -6,6 +6,7 @@
 //
 
 const std = @import("std");
+const stdout = std.io.getStdOut().writer();
 
 const Torrent = @import("torrent.zig").Torrent;
 const tracker = @import("tracker.zig");
@@ -86,7 +87,7 @@ pub const Client = struct {
             }
         }
 
-        std.debug.print("Found a total of {} peers. Terminating threads.\n", .{result_buffer.items.len});
+        std.log.debug("Found a total of {} peers. Terminating threads.", .{result_buffer.items.len});
         std.time.sleep(2 * std.time.ns_per_s);
 
         return result_buffer;
@@ -106,7 +107,7 @@ pub const Client = struct {
         var peers = try my_tracker.fetchPeers();
         defer peers.deinit();
 
-        std.debug.print("Received {d} peers. Continue with downloading...\n", .{peers.items.len});
+        std.log.debug("Received {d} peers. Continue with downloading...", .{peers.items.len});
 
         var peer_queue = piece.PeerQueue.init(self.allocator);
         defer peer_queue.deinit();
@@ -153,6 +154,7 @@ pub const Client = struct {
                 .torrent = self.torrent,
                 .result_buffer = &result_buffer,
                 .result_mutex = &result_mutex,
+                .is_connected = std.atomic.Value(bool).init(false),
             };
 
             threads[i] = try std.Thread.spawn(.{}, piece.downloadWorkerThread, .{&contexts[i]});
@@ -181,18 +183,18 @@ pub const Client = struct {
             defer self.allocator.free(curr_piece.data);
             result_mutex.unlock();
 
-            std.debug.print("Writing piece: {}\n", .{curr_piece.index});
+            std.log.debug("Writing piece: {}", .{curr_piece.index});
 
             // Try to write piece to disk
             self.writePieceToDisk(&file_handles, &curr_piece) catch |err| {
-                std.debug.print("Error writing piece to disk: {}\n", .{err});
+                std.log.err("Error writing piece to disk: {}", .{err});
 
                 result_mutex.lock();
                 defer result_mutex.unlock();
 
                 // Re-queue piece
                 result_buffer.append(curr_piece) catch {
-                    std.debug.print("Error re-queueing piece: {}\n", .{curr_piece.index});
+                    std.log.err("Error re-queueing piece: {}", .{curr_piece.index});
                 };
 
                 continue;
@@ -200,14 +202,37 @@ pub const Client = struct {
 
             // On success, increment downloaded pieces
             downloaded_pieces += 1;
+
+            // Print progress, if we're not logging all info
+            if (!std.log.defaultLogEnabled(.info)) {
+                var connected_peers: usize = 0;
+                for (contexts) |ctx| {
+                    if (ctx.is_connected.load(.monotonic)) {
+                        connected_peers += 1;
+                    }
+                }
+
+                self.printProgress(downloaded_pieces, connected_peers) catch |err| {
+                    std.log.err("Error printing progress: {}", .{err});
+                };
+            }
         }
 
-        std.debug.print("Downloaded all pieces. Terminating threads.\n", .{});
+        std.log.info("Downloaded all pieces. Terminating threads.", .{});
 
         // Wait for all threads to complete
         for (threads) |thread| {
             thread.join();
         }
+    }
+
+    fn printProgress(self: @This(), downloaded_pieces: usize, connected_peers: usize) !void {
+        try stdout.print("\rDownloaded {d}/{d} pieces — {d:.2}% | Connected to {d} peers", .{
+            downloaded_pieces,
+            self.torrent.metadata.info.pieces.len,
+            @as(f64, @floatFromInt(downloaded_pieces)) * 100.0 / @as(f64, @floatFromInt(self.torrent.metadata.info.pieces.len)),
+            connected_peers,
+        });
     }
 
     /// Initializes file handles for all files in the torrent, and creates parent directories if needed.
@@ -256,6 +281,7 @@ pub const Client = struct {
         for (spans) |span| {
             const file_handle = file_handles.get(span.file_index);
             if (file_handle == null) {
+                std.log.err("File handle not found for index: {}", .{span.file_index});
                 continue;
             }
 

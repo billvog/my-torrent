@@ -85,11 +85,11 @@ pub fn trackerWorkerThread(context: *TrackerWorkerContext) void {
         const pack = context.queue.pop() orelse break;
         const tracker = pack.tracker;
 
-        std.debug.print("Connecting to tracker: {s}\n", .{tracker.url});
+        std.log.debug("Connecting to tracker: {s}", .{tracker.url});
 
         // Fetch peers from tracker
         const peers = tracker.fetchPeers() catch |err| {
-            std.debug.print("Error connecting to tracker: {s}: {}\n", .{ tracker.url, err });
+            std.log.warn("Error connecting to tracker: {s}: {}", .{ tracker.url, err });
 
             // If the url is invalid, or the protocol is not supported,
             // continue to the next tracker without re-queuing.
@@ -109,10 +109,10 @@ pub fn trackerWorkerThread(context: *TrackerWorkerContext) void {
             //         .url = tracker.url,
             //         .retries = tracker.retries + 1,
             //     }) catch {
-            //         std.debug.print("Failed to re-queue tracker {s}\n", .{tracker.url});
+            //         std.log.warn("Failed to re-queue tracker {s}", .{tracker.url});
             //     };
             // } else {
-            //     std.debug.print("Tracker {s} failed after {} retries\n", .{ tracker.url, MAX_TRACKER_RETRIES });
+            //     std.log.warn("Tracker {s} failed after {} retries", .{ tracker.url, MAX_TRACKER_RETRIES });
             // }
 
             // Continue to next tracker
@@ -131,7 +131,7 @@ pub fn trackerWorkerThread(context: *TrackerWorkerContext) void {
         // Store the result
         for (peers.items) |p| {
             context.result_buffer.append(p) catch {
-                std.debug.print("Failed to append peer to result buffer\n", .{});
+                std.log.warn("Failed to append peer to result buffer", .{});
             };
         }
     }
@@ -176,7 +176,7 @@ pub const Tracker = struct {
         const writer = stream.writer();
         const reader = stream.reader();
 
-        std.debug.print("Attemping connection with tracker: {s}...\n", .{announce});
+        std.log.debug("Attemping connection with tracker: {s}...", .{announce});
 
         var transaction_id = std.crypto.random.int(u32);
 
@@ -189,9 +189,9 @@ pub const Tracker = struct {
             return error.InvalidTrackerResponse;
         }
 
-        std.debug.print("Connected to tracker:\n", .{});
-        std.debug.print("  Tracker: {s}\n", .{announce});
-        std.debug.print("  Connection ID: {}\n", .{response.connection_id});
+        std.log.debug("Connected to tracker:", .{});
+        std.log.debug("  Tracker: {s}", .{announce});
+        std.log.debug("  Connection ID: {}", .{response.connection_id});
 
         transaction_id = std.crypto.random.int(u32);
         const key = std.crypto.random.int(u32);
@@ -220,10 +220,9 @@ pub const Tracker = struct {
             return error.InvalidTrackerResponse;
         }
 
-        std.debug.print("Announce:\n", .{});
-        std.debug.print("  Tracker: {s}\n", .{announce});
-        std.debug.print("  Interval: {}\n", .{announce_response.interval});
-        std.debug.print("  Seeders: {}\n", .{announce_response.seeders});
+        std.log.debug("Announce:", .{});
+        std.log.debug("  Tracker: {s}", .{announce});
+        std.log.debug("  Interval: {}", .{announce_response.interval});
 
         var peers = peer.Peers.init(self.allocator);
 
@@ -246,7 +245,7 @@ pub const Tracker = struct {
             });
         }
 
-        std.debug.print("Found {} peers\n", .{peers.items.len});
+        std.log.debug("Found {} peers", .{peers.items.len});
 
         return peers;
     }
@@ -284,7 +283,7 @@ pub const Tracker = struct {
         var response = std.ArrayList(u8).init(self.allocator);
         defer response.deinit();
 
-        std.debug.print("Attemping connection with tracker: {s}...\n", .{announce});
+        std.log.debug("Attemping connection with tracker: {s}...", .{announce});
 
         // Make the GET request.
         const request = try client.fetch(.{ .method = .GET, .location = .{ .uri = uri }, .response_storage = .{ .dynamic = &response } });

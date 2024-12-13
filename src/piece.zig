@@ -34,6 +34,7 @@ pub const DownloadWorkerContext = struct {
     torrent: *Torrent,
     result_buffer: *std.ArrayList(DownloadedPiece),
     result_mutex: *std.Thread.Mutex,
+    is_connected: std.atomic.Value(bool),
 };
 
 const ConnectedPeer = struct {
@@ -48,11 +49,11 @@ fn connectToPeer(peer_queue: *PeerQueue) !ConnectedPeer {
         const item = peer_queue.pop() orelse return error.NoPeers;
 
         const stream = item.connect() catch |err| {
-            std.debug.print("Failed to connect to peer: {}\n", .{err});
+            std.log.warn("Failed to connect to peer: {}", .{err});
 
             // Re-queue peer
             peer_queue.push(item) catch {
-                std.debug.print("Failed to re-queue peer\n", .{});
+                std.log.warn("Failed to re-queue peer", .{});
             };
 
             continue;
@@ -69,21 +70,23 @@ fn connectToPeer(peer_queue: *PeerQueue) !ConnectedPeer {
 // Thread function to download pieces.
 pub fn downloadWorkerThread(context: *DownloadWorkerContext) void {
     var connected: ?ConnectedPeer = null;
-
     var last_keepalive = std.time.milliTimestamp();
 
     while (true) {
         if (connected == null) {
+            context.is_connected.store(false, .release);
             connected = connectToPeer(context.peer_queue) catch |err| {
-                std.debug.print("No more peers available: {}\n", .{err});
+                std.log.warn("No more peers available: {}", .{err});
                 break;
             };
         }
 
+        context.is_connected.store(true, .release);
+
         // Send keepalive every 2 minutes
-        if (std.time.milliTimestamp() - last_keepalive > 2 * std.time.ms_per_s) {
+        if (std.time.milliTimestamp() - last_keepalive >= 2 * std.time.ms_per_s) {
             connected.?.peer.keepAlive(&connected.?.stream) catch |err| {
-                std.debug.print("Error sending keepalive: {}\n", .{err});
+                std.log.warn("Error sending keepalive: {}", .{err});
             };
 
             last_keepalive = std.time.milliTimestamp();
@@ -95,21 +98,21 @@ pub fn downloadWorkerThread(context: *DownloadWorkerContext) void {
         // Download the piece
         const piece_data = connected.?.peer.downloadPiece(&connected.?.stream, piece_info.index) catch |err| {
             if (err == error.BrokenPipe) {
-                std.debug.print("Peer disconnected\n", .{});
+                std.log.warn("Peer disconnected", .{});
                 break;
             }
 
-            std.debug.print("Error downloading piece: {}: {}\n", .{ piece_info.index, err });
+            std.log.warn("Error downloading piece: {}: {}", .{ piece_info.index, err });
 
             // Re-queue piece
             context.piece_queue.push(.{ .index = piece_info.index }) catch {
-                std.debug.print("Failed to re-queue piece {}\n", .{piece_info.index});
+                std.log.warn("Failed to re-queue piece {}", .{piece_info.index});
             };
 
             // If we have too many failed attempts, disconnect peer
             connected.?.failed_attempts += 1;
             if (connected.?.failed_attempts >= 3) {
-                std.debug.print("Too many failed attempts, disconnecting peer\n", .{});
+                std.log.warn("Too many failed attempts, disconnecting peer", .{});
                 connected.?.stream.close();
                 connected = null;
             }

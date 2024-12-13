@@ -162,7 +162,7 @@ pub const Peer = struct {
         const response_handshake = try reader.readStruct(Handshake);
 
         // Print peer's id.
-        std.debug.print("Handshake: Peer Id: {s}\n", .{std.fmt.bytesToHex(response_handshake.peer_id, .lower)});
+        std.log.debug("Handshake: Peer Id: {s}", .{std.fmt.bytesToHex(response_handshake.peer_id, .lower)});
 
         return stream;
     }
@@ -172,7 +172,7 @@ pub const Peer = struct {
         const peer_str = try self.toSlice(self.allocator);
         defer self.allocator.free(peer_str);
 
-        std.debug.print("Connecting to peer: {s}\n", .{peer_str});
+        std.log.debug("Connecting to peer: {s}", .{peer_str});
 
         // Make a handshake with the peer.
         var stream = try self.handshake();
@@ -240,7 +240,7 @@ pub const Peer = struct {
         var begin: u32 = 0;
         const block_size = @min(16 * 1024, piece_buf.len);
 
-        // std.debug.print("Downloading piece: {} -- block: {}\n", .{ piece_index, block_size });
+        std.log.debug("Downloading piece: {} -- block: {}", .{ piece_index, block_size });
 
         while (begin < piece_buf.len) : (begin += block_size) {
             // Send request for block.
@@ -248,7 +248,7 @@ pub const Peer = struct {
             const request: PeerMessage = .{ .request = .{ .index = piece_index, .begin = begin, .length = cur_block_len } };
             try request.write(writer);
 
-            // std.debug.print("Requested block for piece: {} -- begin: {} -- length: {}\n", .{ piece_index, begin, cur_block_len });
+            std.log.debug("Requested block for piece: {} -- begin: {} -- length: {}", .{ piece_index, begin, cur_block_len });
 
             // Receive the block.
             const response: PeerMessage = try PeerMessage.read(self.allocator, reader);
@@ -258,7 +258,7 @@ pub const Peer = struct {
             }
 
             // Add leading space to align with 'requested block' log above.
-            // std.debug.print(" Received block for piece: {}\n", .{piece_index});
+            std.log.debug(" Received block for piece: {}", .{piece_index});
 
             // Verify it's the one we requested.
             if (begin != response.piece.begin or cur_block_len != response.piece.block.len) {
@@ -279,6 +279,6 @@ pub const Peer = struct {
             return error.InvalidPieceHash;
         }
 
-        std.debug.print("Downloaded piece: {}\n", .{piece_index});
+        std.log.debug("Downloaded piece: {}", .{piece_index});
     }
 };
