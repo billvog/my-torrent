@@ -35,6 +35,7 @@ pub const DownloadWorkerContext = struct {
     result_buffer: *std.ArrayList(DownloadedPiece),
     result_mutex: *std.Thread.Mutex,
     is_connected: std.atomic.Value(bool),
+    should_stop: *std.atomic.Value(bool),
 };
 
 const ConnectedPeer = struct {
@@ -72,7 +73,7 @@ pub fn downloadWorkerThread(context: *DownloadWorkerContext) void {
     var connected: ?ConnectedPeer = null;
     var last_keepalive = std.time.milliTimestamp();
 
-    while (true) {
+    while (!context.should_stop.load(.monotonic)) {
         if (connected == null) {
             context.is_connected.store(false, .release);
             connected = connectToPeer(context.peer_queue) catch |err| {

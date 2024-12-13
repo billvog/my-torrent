@@ -12,9 +12,10 @@ const Torrent = @import("torrent.zig").Torrent;
 const tracker = @import("tracker.zig");
 const peer = @import("peer.zig");
 const piece = @import("piece.zig");
+const progress = @import("client_progress.zig");
 
 const MAX_TRACKER_THREADS = 4;
-const MAX_DOWNLOAD_THREADS = 20;
+const MAX_DOWNLOAD_THREADS = 50;
 
 const FileHandle = struct {
     file: std.fs.File,
@@ -88,7 +89,6 @@ pub const Client = struct {
         }
 
         std.log.debug("Found a total of {} peers. Terminating threads.", .{result_buffer.items.len});
-        std.time.sleep(2 * std.time.ns_per_s);
 
         return result_buffer;
     }
@@ -147,6 +147,9 @@ pub const Client = struct {
         var contexts = try self.allocator.alloc(piece.DownloadWorkerContext, num_threads);
         defer self.allocator.free(contexts);
 
+        // Control variable to stop threads
+        var should_stop = std.atomic.Value(bool).init(false);
+
         for (0..num_threads) |i| {
             contexts[i] = .{
                 .piece_queue = &piece_queue,
@@ -155,6 +158,7 @@ pub const Client = struct {
                 .result_buffer = &result_buffer,
                 .result_mutex = &result_mutex,
                 .is_connected = std.atomic.Value(bool).init(false),
+                .should_stop = &should_stop,
             };
 
             threads[i] = try std.Thread.spawn(.{}, piece.downloadWorkerThread, .{&contexts[i]});
@@ -165,12 +169,32 @@ pub const Client = struct {
         defer self.deinitFileHandles(&file_handles);
 
         // Keep track of downloaded pieces
-        var downloaded_pieces: usize = 0;
+        var downloaded_pieces = std.atomic.Value(usize).init(0);
+        // Keep track of connected peers
+        var connected_peers = std.atomic.Value(usize).init(0);
+
+        // Start progress thread
+        const client_progress = try progress.ClientProgress.init(
+            self.allocator,
+            &downloaded_pieces,
+            &self.torrent.metadata.info.pieces.len,
+            &connected_peers,
+            &should_stop,
+        );
 
         // Process completed pieces and write to file
-        while (downloaded_pieces < self.torrent.metadata.info.pieces.len) {
+        while (!should_stop.load(.monotonic)) {
             // Sleep for some time between iterations
             defer std.time.sleep(10 * std.time.ns_per_ms);
+
+            // Count connected peers
+            var tmp_connected_peers: usize = 0;
+            for (contexts) |ctx| {
+                if (ctx.is_connected.load(.monotonic)) {
+                    tmp_connected_peers += 1;
+                }
+            }
+            connected_peers.store(tmp_connected_peers, .release);
 
             // Skip if no items in result buffer
             if (result_buffer.items.len == 0) {
@@ -201,38 +225,23 @@ pub const Client = struct {
             };
 
             // On success, increment downloaded pieces
-            downloaded_pieces += 1;
-
-            // Print progress, if we're not logging all info
-            if (!std.log.defaultLogEnabled(.info)) {
-                var connected_peers: usize = 0;
-                for (contexts) |ctx| {
-                    if (ctx.is_connected.load(.monotonic)) {
-                        connected_peers += 1;
-                    }
-                }
-
-                self.printProgress(downloaded_pieces, connected_peers) catch |err| {
-                    std.log.err("Error printing progress: {}", .{err});
-                };
+            _ = downloaded_pieces.fetchAdd(1, .release);
+            if (downloaded_pieces.load(.monotonic) == self.torrent.metadata.info.pieces.len) {
+                should_stop.store(true, .release);
             }
         }
 
+        // Wait for the progress thread to complete
+        client_progress.deinit();
+
+        // Print logs
         std.log.info("Downloaded all pieces. Terminating threads.", .{});
+        try stdout.print("\nDownload is ready!\n", .{}); // This is for release mode
 
         // Wait for all threads to complete
         for (threads) |thread| {
             thread.join();
         }
-    }
-
-    fn printProgress(self: @This(), downloaded_pieces: usize, connected_peers: usize) !void {
-        try stdout.print("\rDownloaded {d}/{d} pieces — {d:.2}% | Connected to {d} peers", .{
-            downloaded_pieces,
-            self.torrent.metadata.info.pieces.len,
-            @as(f64, @floatFromInt(downloaded_pieces)) * 100.0 / @as(f64, @floatFromInt(self.torrent.metadata.info.pieces.len)),
-            connected_peers,
-        });
     }
 
     /// Initializes file handles for all files in the torrent, and creates parent directories if needed.
