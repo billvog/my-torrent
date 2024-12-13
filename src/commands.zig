@@ -35,7 +35,7 @@ pub const Commands = struct {
         try stdout.print("  Total Length: {d}\n", .{std.fmt.fmtIntSizeDec(metadata.info.total_length)});
         try stdout.print("  Piece Length: {d}\n", .{std.fmt.fmtIntSizeDec(metadata.info.piece_length)});
         try stdout.print("  Pieces ({}):\n", .{metadata.info.pieces.len});
-        for (metadata.info.pieces[0..10]) |piece| {
+        for (metadata.info.pieces[0..@min(10, metadata.info.pieces.len)]) |piece| {
             try stdout.print("    {s}\n", .{std.fmt.bytesToHex(piece[0..20], .lower)});
         }
         if (metadata.info.pieces.len > 10) {
