@@ -236,7 +236,7 @@ pub const Client = struct {
 
         // Print logs
         std.log.info("Downloaded all pieces. Terminating threads.", .{});
-        try stdout.print("\nDownload is ready!\n", .{}); // This is for release mode
+        try stdout.print("\nDownload is ready! Exiting...\n", .{}); // This is for release mode
 
         // Wait for all threads to complete
         for (threads) |thread| {

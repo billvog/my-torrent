@@ -45,8 +45,8 @@ const ConnectedPeer = struct {
 };
 
 /// Connect to a peer from the queue.
-fn connectToPeer(peer_queue: *PeerQueue) !ConnectedPeer {
-    while (true) {
+fn connectToPeer(peer_queue: *PeerQueue, should_stop: *std.atomic.Value(bool)) !ConnectedPeer {
+    while (!should_stop.load(.monotonic)) {
         const item = peer_queue.pop() orelse return error.NoPeers;
 
         const stream = item.connect() catch |err| {
@@ -66,6 +66,8 @@ fn connectToPeer(peer_queue: *PeerQueue) !ConnectedPeer {
             .failed_attempts = 0,
         };
     }
+
+    return error.ShouldStop;
 }
 
 // Thread function to download pieces.
@@ -76,8 +78,11 @@ pub fn downloadWorkerThread(context: *DownloadWorkerContext) void {
     while (!context.should_stop.load(.monotonic)) {
         if (connected == null) {
             context.is_connected.store(false, .release);
-            connected = connectToPeer(context.peer_queue) catch |err| {
-                std.log.warn("No more peers available: {}", .{err});
+            connected = connectToPeer(context.peer_queue, context.should_stop) catch |err| {
+                if (err != error.ShouldStop) {
+                    std.log.warn("No more peers available: {}", .{err});
+                }
+
                 break;
             };
         }
