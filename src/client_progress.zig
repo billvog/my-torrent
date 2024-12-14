@@ -1,3 +1,10 @@
+//
+// This file is part of my-torrent, a BitTorrent client written in Zig.
+//
+// Created on 14/12/2024 by Vasilis Voyiadjis.
+// Distributed under the MIT License.
+//
+
 const std = @import("std");
 const stdout = std.io.getStdOut().writer();
 
