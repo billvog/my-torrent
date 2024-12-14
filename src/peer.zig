@@ -13,6 +13,8 @@ pub const Stream = network.Socket;
 
 const Torrent = @import("torrent.zig").Torrent;
 
+const PEER_SOCKET_TIMEOUT = 2 * std.time.us_per_s; // 2 second
+
 const Handshake = extern struct {
     protocol_length: u8 align(1) = 19,
     ident: [19]u8 align(1) = "BitTorrent protocol".*,
@@ -137,8 +139,7 @@ pub const Peer = struct {
         return try std.fmt.allocPrint(allocator, "{d}.{d}.{d}.{d}:{d}", .{ self.ip[0], self.ip[1], self.ip[2], self.ip[3], self.port });
     }
 
-    /// Performs a handshake with the peer.
-    fn handshake(self: @This()) !Stream {
+    fn create_stream(self: @This()) !Stream {
         try network.init();
         defer network.deinit();
 
@@ -147,8 +148,18 @@ pub const Peer = struct {
         var stream = try Stream.create(.ipv4, .tcp);
         errdefer stream.close();
 
+        try stream.setTimeouts(
+            PEER_SOCKET_TIMEOUT, // read
+            PEER_SOCKET_TIMEOUT, // write
+        );
+
         try stream.connect(.{ .address = address, .port = self.port });
 
+        return stream;
+    }
+
+    /// Performs a handshake with the peer.
+    fn handshake(self: @This(), stream: *Stream) !void {
         const writer = stream.writer();
         const reader = stream.reader();
 
@@ -163,8 +174,6 @@ pub const Peer = struct {
 
         // Print peer's id.
         std.log.debug("Handshake: Peer Id: {s}", .{std.fmt.bytesToHex(response_handshake.peer_id, .lower)});
-
-        return stream;
     }
 
     /// Makes a handshake and sends initial requests to the peer.
@@ -174,9 +183,12 @@ pub const Peer = struct {
 
         std.log.debug("Connecting to peer: {s}", .{peer_str});
 
-        // Make a handshake with the peer.
-        var stream = try self.handshake();
+        // Create socket connection.
+        var stream = try self.create_stream();
         errdefer stream.close();
+
+        // Make a handshake with the peer.
+        try self.handshake(&stream);
 
         const writer = stream.writer().any();
         const reader = stream.reader().any();
