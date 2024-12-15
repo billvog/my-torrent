@@ -12,6 +12,7 @@ const Torrent = @import("torrent.zig").Torrent;
 const tracker = @import("tracker.zig");
 const peer = @import("peer.zig");
 const piece = @import("piece.zig");
+const downloader = @import("downloader.zig");
 const progress = @import("client_progress.zig");
 
 const MAX_TRACKER_THREADS = 4;
@@ -109,14 +110,14 @@ pub const Client = struct {
 
         std.log.debug("Received {d} peers. Continue with downloading...", .{peers.items.len});
 
-        var peer_queue = piece.PeerQueue.init(self.allocator);
+        var peer_queue = downloader.PeerQueue.init(self.allocator);
         defer peer_queue.deinit();
 
         for (peers.items) |*p| {
             try peer_queue.push(p);
         }
 
-        var piece_queue = piece.DownloadQueue.init(self.allocator);
+        var piece_queue = downloader.DownloadQueue.init(self.allocator);
         defer piece_queue.deinit();
 
         // Fill queue with all piece indices
@@ -125,7 +126,7 @@ pub const Client = struct {
         }
 
         // Create shared result buffer
-        var result_buffer = std.ArrayList(piece.DownloadedPiece).init(self.allocator);
+        var result_buffer = std.ArrayList(downloader.DownloadedPiece).init(self.allocator);
         defer {
             for (result_buffer.items) |p| {
                 p.deinit(self.allocator);
@@ -136,32 +137,32 @@ pub const Client = struct {
         // Mutex for result buffer
         var result_mutex = std.Thread.Mutex{};
 
-        // One thread per peer, up to X.
-        const num_threads = @min(MAX_DOWNLOAD_THREADS, peers.items.len);
-
-        // Allocate worker threads
-        var threads = try self.allocator.alloc(std.Thread, num_threads);
-        defer self.allocator.free(threads);
-
-        // Allocate worker contexts
-        var contexts = try self.allocator.alloc(piece.DownloadWorkerContext, num_threads);
-        defer self.allocator.free(contexts);
-
         // Control variable to stop threads
         var should_stop = std.atomic.Value(bool).init(false);
 
-        for (0..num_threads) |i| {
-            contexts[i] = .{
-                .piece_queue = &piece_queue,
-                .peer_queue = &peer_queue,
-                .torrent = self.torrent,
-                .result_buffer = &result_buffer,
-                .result_mutex = &result_mutex,
-                .is_connected = std.atomic.Value(bool).init(false),
-                .should_stop = &should_stop,
-            };
+        // One thread per peer, up to X.
+        const num_threads = @as(usize, @min(MAX_DOWNLOAD_THREADS, peers.items.len));
 
-            threads[i] = try std.Thread.spawn(.{}, piece.downloadWorkerThread, .{&contexts[i]});
+        // Allocate downloaders
+        var downloaders = try std.ArrayList(*downloader.Downloader).initCapacity(self.allocator, num_threads);
+        defer {
+            for (downloaders.items) |d| {
+                d.deinit();
+            }
+            downloaders.deinit();
+        }
+
+        // Start download threads
+        for (0..downloaders.capacity) |_| {
+            try downloaders.append(try downloader.Downloader.init(
+                self.allocator,
+                &result_mutex,
+                &peer_queue,
+                &piece_queue,
+                &result_buffer,
+                &should_stop,
+                self.torrent,
+            ));
         }
 
         // Open file handles
@@ -182,6 +183,13 @@ pub const Client = struct {
             &should_stop,
         );
 
+        defer {
+            client_progress.deinit();
+            stdout.print("\nDownload is ready! Exiting...\n", .{}) catch {
+                std.log.err("Error printing download is ready message.", .{});
+            };
+        }
+
         // Process completed pieces and write to file
         while (!should_stop.load(.monotonic)) {
             // Sleep for some time between iterations
@@ -189,8 +197,8 @@ pub const Client = struct {
 
             // Count connected peers
             var tmp_connected_peers: usize = 0;
-            for (contexts) |ctx| {
-                if (ctx.is_connected.load(.monotonic)) {
+            for (downloaders.items) |d| {
+                if (d.is_connected.load(.monotonic)) {
                     tmp_connected_peers += 1;
                 }
             }
@@ -229,18 +237,6 @@ pub const Client = struct {
             if (downloaded_pieces.load(.monotonic) == self.torrent.metadata.info.pieces.len) {
                 should_stop.store(true, .release);
             }
-        }
-
-        // Wait for the progress thread to complete
-        client_progress.deinit();
-
-        // Print logs
-        std.log.info("Downloaded all pieces. Terminating threads.", .{});
-        try stdout.print("\nDownload is ready! Exiting...\n", .{}); // This is for release mode
-
-        // Wait for all threads to complete
-        for (threads) |thread| {
-            thread.join();
         }
     }
 
@@ -283,7 +279,7 @@ pub const Client = struct {
     }
 
     /// Writes a downloaded piece to disk, handling multiple file spans.
-    fn writePieceToDisk(self: @This(), file_handles: *FileHandles, downloaded_piece: *const piece.DownloadedPiece) !void {
+    fn writePieceToDisk(self: @This(), file_handles: *FileHandles, downloaded_piece: *const downloader.DownloadedPiece) !void {
         const spans = try piece.getPieceFileSpans(self.allocator, self.torrent, downloaded_piece.index);
         defer self.allocator.free(spans);
 
