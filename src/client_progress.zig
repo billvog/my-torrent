@@ -53,7 +53,7 @@ pub const ClientProgress = struct {
             return;
         }
 
-        while (!self.should_stop.load(.monotonic)) {
+        while (true) {
             // Update once per quarter second.
             defer std.time.sleep(250 * std.time.ns_per_ms);
 
@@ -69,7 +69,11 @@ pub const ClientProgress = struct {
                 @divTrunc((std.time.milliTimestamp() - self.started_time), 1000),
             }) catch |err| {
                 std.log.err("Error printing progress: {}", .{err});
+                break;
             };
+
+            // If the client is stopped, break the loop.
+            if (self.should_stop.load(.monotonic)) break;
         }
     }
 };
